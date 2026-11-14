@@ -8,17 +8,21 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
+    "test": "tsx src/test-verification.ts",
     "clean": "node -e \"try { fs.rmSync('dist', { recursive: true, force: true }) } catch (e) {}\""
   },
   "dependencies": {
     "@agentcut/shared": "*",
-    "express": "^4.21.2"
+    "cors": "^2.8.6",
+    "dotenv": "^18.0.10",
+    "express": "^4.21.2",
+    "mongodb": "^7.9.0"
   },
   "devDependencies": {
+    "@types/cors": "^2.8.19",
     "@types/express": "^5.0.0",
     "@types/node": "^22.13.4",
     "tsx": "^4.19.3",
     "typescript": "^5.7.3"
   }
 }
-

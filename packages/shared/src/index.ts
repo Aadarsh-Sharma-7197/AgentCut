@@ -5,3 +5,19 @@ export interface HealthStatus {
   timestamp: string;
 }
 
+export interface Project {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateProjectDTO {
+  name: string;
+}
+
+export interface ApiResponse<T> {
+  data?: T;
+  error?: string;
+  message?: string;
+}
