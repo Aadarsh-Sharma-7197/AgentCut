@@ -16,6 +16,22 @@ export interface CreateProjectDTO {
   name: string;
 }
 
+export interface MediaAsset {
+  id: string;
+  projectId: string;
+  originalName: string;
+  fileSize: number;
+  mimeType: string;
+  duration: number;
+  width: number;
+  height: number;
+  frameRate: string;
+  videoCodec: string;
+  audioCodec: string | null;
+  format: string;
+  createdAt: string;
+}
+
 export interface ApiResponse<T> {
   data?: T;
   error?: string;

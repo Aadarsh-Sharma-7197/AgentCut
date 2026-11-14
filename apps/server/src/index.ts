@@ -14,6 +14,7 @@ import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import { AGENTCUT_VERSION, type HealthStatus } from "@agentcut/shared";
 import { connectDB } from "./config/db.js";
+import { initMediaIndexes } from "./services/media.service.js";
 import { projectRouter } from "./routes/project.routes.js";
 
 const app = express();
@@ -52,6 +53,7 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
 export async function startServer() {
   try {
     await connectDB();
+    await initMediaIndexes();
     const server = app.listen(port, () => {
       console.log(`[Server] AgentCut API running on http://localhost:${port}`);
     });

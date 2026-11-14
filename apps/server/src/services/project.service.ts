@@ -1,6 +1,7 @@
 import { Collection, ObjectId } from "mongodb";
 import { getDB } from "../config/db.js";
 import { ProjectDocument, toProjectDTO } from "../models/project.model.js";
+import { deleteMediaAssetsByProject } from "./media.service.js";
 import type { Project } from "@agentcut/shared";
 
 const COLLECTION_NAME = "projects";
@@ -49,12 +50,17 @@ export async function getProjectById(id: string): Promise<Project | null> {
 
 /**
  * Deletes a project.
- * POLICY ENFORCEMENT: Deletion removes ONLY the MongoDB project metadata record.
+ * POLICY ENFORCEMENT: Deletion removes ONLY the MongoDB project and associated media metadata records.
  * It NEVER deletes original media files, directories, user files, or performs filesystem cleanup.
  */
 export async function deleteProject(id: string): Promise<boolean> {
   const collection = getCollection();
   const result = await collection.deleteOne({ _id: new ObjectId(id) });
-  return result.deletedCount === 1;
+  if (result.deletedCount === 1) {
+    // Remove associated media asset metadata from MongoDB, leaving disk untouched
+    await deleteMediaAssetsByProject(id);
+    return true;
+  }
+  return false;
 }
 
