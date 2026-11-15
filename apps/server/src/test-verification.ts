@@ -9,7 +9,7 @@ import { spawnSync } from "child_process";
 dotenv.config({ path: "./apps/server/.env" });
 dotenv.config({ path: path.resolve(process.cwd(), "apps/server/.env") });
 
-import app from "./index.js";
+const { default: app } = await import("./index.js");
 import { connectDB, closeDB, getDB } from "./config/db.js";
 import { getProjectMediaDir, resolveStoredFilePath } from "./config/storage.js";
 import { getFFprobePath } from "./utils/ffprobe.js";

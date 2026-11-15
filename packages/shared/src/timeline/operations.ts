@@ -1,0 +1,346 @@
+import type { Timeline, Track, Clip, TimelineSettings, TrackType } from "./types.js";
+import { validateTimeline, TimelineValidationError, type ValidateTimelineOptions } from "./validation.js";
+
+function generateId(): string {
+  // Pure lightweight fallback/UUID generator for universal shared environment (Node & Browser)
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return "tl_" + Math.random().toString(36).substring(2, 11) + "_" + Date.now().toString(36);
+}
+
+export interface CreateTimelineParams {
+  projectId: string;
+  id?: string;
+  settings?: Partial<TimelineSettings>;
+  tracks?: Track[];
+}
+
+export interface CreateTrackInput {
+  id?: string;
+  name: string;
+  type: TrackType;
+  index?: number;
+  enabled?: boolean;
+}
+
+export interface CreateClipInput {
+  id?: string;
+  assetId: string;
+  trackId: string;
+  sourceStart: number;
+  sourceEnd: number;
+  timelineStart: number;
+  name?: string;
+}
+
+/**
+ * Creates a new, empty timeline immutably.
+ *
+ * @param params Project ID, optional timeline ID, initial tracks and settings.
+ * @param options Optional validation options (e.g. media assets catalog).
+ */
+export function createEmptyTimeline(
+  params: CreateTimelineParams,
+  options?: ValidateTimelineOptions
+): Timeline {
+  const now = new Date().toISOString();
+  const timeline: Timeline = {
+    id: params.id || generateId(),
+    projectId: params.projectId,
+    tracks: params.tracks
+      ? params.tracks.map((t) => ({ ...t, clips: t.clips.map((c) => ({ ...c })) }))
+      : [],
+    settings: {
+      frameRate: params.settings?.frameRate ?? 30,
+      width: params.settings?.width ?? 1920,
+      height: params.settings?.height ?? 1080
+    },
+    createdAt: now,
+    updatedAt: now
+  };
+
+  const validation = validateTimeline(timeline, options);
+  if (!validation.valid) {
+    throw new TimelineValidationError("Failed to create empty timeline: validation error.", validation.errors);
+  }
+
+  return timeline;
+}
+
+/**
+ * Adds a new track to a timeline immutably.
+ *
+ * @param timeline The input timeline (will not be mutated).
+ * @param input Track definition parameters.
+ * @param options Optional validation options (e.g. media assets catalog).
+ */
+export function addTrack(
+  timeline: Timeline,
+  input: CreateTrackInput,
+  options?: ValidateTimelineOptions
+): Timeline {
+  const trackId = input.id || generateId();
+
+  // Check for duplicate track ID
+  if (timeline.tracks.some((t) => t.id === trackId)) {
+    throw new Error(`Cannot add track: track ID '${trackId}' already exists in timeline.`);
+  }
+
+  const index = typeof input.index === "number" ? input.index : timeline.tracks.length;
+
+  const newTrack: Track = {
+    id: trackId,
+    name: input.name,
+    type: input.type,
+    index,
+    enabled: input.enabled ?? true,
+    clips: []
+  };
+
+  const updatedTracks = timeline.tracks.map((t) => ({
+    ...t,
+    clips: t.clips.map((c) => ({ ...c }))
+  }));
+
+  // Insert track at index or append
+  if (index >= updatedTracks.length) {
+    updatedTracks.push(newTrack);
+  } else {
+    updatedTracks.splice(index, 0, newTrack);
+    // Normalize track indices
+    updatedTracks.forEach((t, i) => {
+      t.index = i;
+    });
+  }
+
+  const nextTimeline: Timeline = {
+    ...timeline,
+    settings: { ...timeline.settings },
+    tracks: updatedTracks,
+    updatedAt: new Date().toISOString()
+  };
+
+  const validation = validateTimeline(nextTimeline, options);
+  if (!validation.valid) {
+    throw new TimelineValidationError("Failed to add track: validation error.", validation.errors);
+  }
+
+  return nextTimeline;
+}
+
+/**
+ * Adds a clip to a specified track immutably.
+ *
+ * Note on Validation:
+ * Structural validation (valid IDs, track existence, source timing, non-negative positions, unique IDs)
+ * is always enforced. To validate media asset existence and track/asset stream compatibility,
+ * pass the optional `options.assets` catalog.
+ *
+ * @param timeline The input timeline (will not be mutated).
+ * @param input Clip parameters.
+ * @param options Optional validation options including media asset catalog.
+ */
+export function addClip(
+  timeline: Timeline,
+  input: CreateClipInput,
+  options?: ValidateTimelineOptions
+): Timeline {
+  const clipId = input.id || generateId();
+
+  // Check for duplicate clip ID across all tracks
+  for (const track of timeline.tracks) {
+    if (track.clips.some((c) => c.id === clipId)) {
+      throw new Error(`Cannot add clip: clip ID '${clipId}' already exists in timeline.`);
+    }
+  }
+
+  const targetTrackExists = timeline.tracks.some((t) => t.id === input.trackId);
+  if (!targetTrackExists) {
+    throw new Error(`Cannot add clip: target track '${input.trackId}' does not exist in timeline.`);
+  }
+
+  const newClip: Clip = {
+    id: clipId,
+    assetId: input.assetId,
+    trackId: input.trackId,
+    sourceStart: input.sourceStart,
+    sourceEnd: input.sourceEnd,
+    timelineStart: input.timelineStart,
+    name: input.name
+  };
+
+  const updatedTracks = timeline.tracks.map((track) => {
+    if (track.id === input.trackId) {
+      return {
+        ...track,
+        clips: [...track.clips.map((c) => ({ ...c })), newClip]
+      };
+    }
+    return {
+      ...track,
+      clips: track.clips.map((c) => ({ ...c }))
+    };
+  });
+
+  const nextTimeline: Timeline = {
+    ...timeline,
+    settings: { ...timeline.settings },
+    tracks: updatedTracks,
+    updatedAt: new Date().toISOString()
+  };
+
+  const validation = validateTimeline(nextTimeline, options);
+  if (!validation.valid) {
+    throw new TimelineValidationError("Failed to add clip: validation error.", validation.errors);
+  }
+
+  return nextTimeline;
+}
+
+/**
+ * Removes a clip from the timeline by clip ID immutably.
+ *
+ * @param timeline The input timeline (will not be mutated).
+ * @param clipId The ID of the clip to remove.
+ * @param options Optional validation options.
+ */
+export function removeClip(
+  timeline: Timeline,
+  clipId: string,
+  options?: ValidateTimelineOptions
+): Timeline {
+  let found = false;
+
+  const updatedTracks = timeline.tracks.map((track) => {
+    const hasClip = track.clips.some((c) => c.id === clipId);
+    if (hasClip) {
+      found = true;
+      return {
+        ...track,
+        clips: track.clips.filter((c) => c.id !== clipId).map((c) => ({ ...c }))
+      };
+    }
+    return {
+      ...track,
+      clips: track.clips.map((c) => ({ ...c }))
+    };
+  });
+
+  if (!found) {
+    throw new Error(`Cannot remove clip: clip '${clipId}' was not found in timeline.`);
+  }
+
+  const nextTimeline: Timeline = {
+    ...timeline,
+    settings: { ...timeline.settings },
+    tracks: updatedTracks,
+    updatedAt: new Date().toISOString()
+  };
+
+  const validation = validateTimeline(nextTimeline, options);
+  if (!validation.valid) {
+    throw new TimelineValidationError("Failed to remove clip: validation error.", validation.errors);
+  }
+
+  return nextTimeline;
+}
+
+/**
+ * Moves a clip to a new timeline start position, optionally changing its track, immutably.
+ *
+ * Note on Validation:
+ * Structural validation (valid positions, track existence) is always enforced.
+ * When moving across tracks, passing `options.assets` enforces stream compatibility checks
+ * (e.g. video asset moving to video track, audio asset moving to audio track, rejecting video/audio on caption tracks).
+ *
+ * @param timeline The input timeline (will not be mutated).
+ * @param clipId The ID of the clip to move.
+ * @param newTimelineStart New start position in seconds (>= 0).
+ * @param newTrackId Optional destination track ID. If omitted, moves within current track.
+ * @param options Optional validation options including media asset catalog.
+ */
+export function moveClip(
+  timeline: Timeline,
+  clipId: string,
+  newTimelineStart: number,
+  newTrackId?: string,
+  options?: ValidateTimelineOptions
+): Timeline {
+  if (typeof newTimelineStart !== "number" || !Number.isFinite(newTimelineStart) || newTimelineStart < 0) {
+    throw new Error(`Cannot move clip: newTimelineStart must be a non-negative finite number (got ${newTimelineStart}).`);
+  }
+
+  let foundClip: Clip | null = null;
+  let sourceTrackId = "";
+
+  // Locate the clip
+  for (const track of timeline.tracks) {
+    const clip = track.clips.find((c) => c.id === clipId);
+    if (clip) {
+      foundClip = clip;
+      sourceTrackId = track.id;
+      break;
+    }
+  }
+
+  if (!foundClip) {
+    throw new Error(`Cannot move clip: clip '${clipId}' was not found in timeline.`);
+  }
+
+  const destinationTrackId = newTrackId || sourceTrackId;
+  const destTrackExists = timeline.tracks.some((t) => t.id === destinationTrackId);
+  if (!destTrackExists) {
+    throw new Error(`Cannot move clip: destination track '${destinationTrackId}' does not exist.`);
+  }
+
+  const updatedClip: Clip = {
+    ...foundClip,
+    trackId: destinationTrackId,
+    timelineStart: newTimelineStart
+  };
+
+  const updatedTracks = timeline.tracks.map((track) => {
+    // If moving within the same track
+    if (sourceTrackId === destinationTrackId && track.id === sourceTrackId) {
+      return {
+        ...track,
+        clips: track.clips.map((c) => (c.id === clipId ? updatedClip : { ...c }))
+      };
+    }
+
+    // If moving from source track to a different destination track
+    if (track.id === sourceTrackId) {
+      return {
+        ...track,
+        clips: track.clips.filter((c) => c.id !== clipId).map((c) => ({ ...c }))
+      };
+    }
+
+    if (track.id === destinationTrackId) {
+      return {
+        ...track,
+        clips: [...track.clips.map((c) => ({ ...c })), updatedClip]
+      };
+    }
+
+    return {
+      ...track,
+      clips: track.clips.map((c) => ({ ...c }))
+    };
+  });
+
+  const nextTimeline: Timeline = {
+    ...timeline,
+    settings: { ...timeline.settings },
+    tracks: updatedTracks,
+    updatedAt: new Date().toISOString()
+  };
+
+  const validation = validateTimeline(nextTimeline, options);
+  if (!validation.valid) {
+    throw new TimelineValidationError("Failed to move clip: validation error.", validation.errors);
+  }
+
+  return nextTimeline;
+}
