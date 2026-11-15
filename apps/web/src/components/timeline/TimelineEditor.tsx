@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import type { Timeline, MediaAsset, Clip, Track } from "@agentcut/shared";
-import { getTimelineDuration, moveClip, splitClipWithResult, trimClip } from "@agentcut/shared";
+import { getTimelineDuration, moveClip, splitClipWithResult, trimClip, deleteClip } from "@agentcut/shared";
 import { fetchProjectTimeline, saveProjectTimeline } from "../../api/timeline";
 import { TimelineSaveQueue } from "../../utils/timelineSaveQueue";
 import {
@@ -220,7 +220,22 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
     }
   }, [timeline, selectedClipId, canSplit, currentTime, mediaAssets, persistTimeline]);
 
-  // Keyboard shortcut: Press 'S' to split selected clip at playhead
+  const handleDeleteSelectedClip = useCallback(() => {
+    if (!timeline || !selectedClipId) return;
+    try {
+      const updated = deleteClip(timeline, selectedClipId, { assets: mediaAssets });
+      // Optimistic UI update & serialized queue persistence
+      persistTimeline(updated);
+      setSelectedClipId(null);
+      setNoticeMessage(null);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to delete clip.";
+      setNoticeMessage(msg);
+      setTimeout(() => setNoticeMessage(null), 3500);
+    }
+  }, [timeline, selectedClipId, mediaAssets, persistTimeline]);
+
+  // Keyboard shortcuts: Press 'S' to split, 'Delete' or 'Backspace' to delete selected clip
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -239,11 +254,23 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
           handleSplitClip();
         }
       }
+
+      if (
+        (e.key === "Delete" || e.key === "Backspace") &&
+        !e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey
+      ) {
+        if (selectedClipId) {
+          e.preventDefault();
+          handleDeleteSelectedClip();
+        }
+      }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [canSplit, handleSplitClip]);
+  }, [canSplit, handleSplitClip, selectedClipId, handleDeleteSelectedClip]);
 
   // Trimming interaction handlers
   const handleClipTrimStart = (
@@ -542,6 +569,8 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
         saveError={saveError}
         canSplit={canSplit}
         onSplit={handleSplitClip}
+        canDelete={Boolean(selectedClipId)}
+        onDelete={handleDeleteSelectedClip}
         onZoomChange={setZoom}
         onResetZoom={handleResetZoom}
       />
@@ -594,6 +623,13 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
               }
             >
               ✂ Split
+            </button>
+            <button
+              className="delete-inspector-btn"
+              onClick={handleDeleteSelectedClip}
+              title="Delete selected clip (Shortcut: Delete / Backspace)"
+            >
+              🗑️ Delete
             </button>
             <button className="deselect-btn" title="Deselect clip" onClick={handleDeselect}>
               ✕ Deselect

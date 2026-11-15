@@ -199,13 +199,20 @@ export function addClip(
 }
 
 /**
- * Removes a clip from the timeline by clip ID immutably.
+ * Deletes a clip from the timeline by clip ID immutably.
+ *
+ * Requirements:
+ * - Removes only the specified clip from its track's clips array.
+ * - Preserves all other clips, tracks, settings, and metadata.
+ * - Enforces validation on the resulting timeline.
+ * - Rejects nonexistent clip IDs with a clear error.
+ * - Guarantees immutability.
  *
  * @param timeline The input timeline (will not be mutated).
- * @param clipId The ID of the clip to remove.
+ * @param clipId The ID of the clip to delete.
  * @param options Optional validation options.
  */
-export function removeClip(
+export function deleteClip(
   timeline: Timeline,
   clipId: string,
   options?: ValidateTimelineOptions
@@ -228,7 +235,7 @@ export function removeClip(
   });
 
   if (!found) {
-    throw new Error(`Cannot remove clip: clip '${clipId}' was not found in timeline.`);
+    throw new Error(`Cannot delete clip: clip '${clipId}' was not found in timeline.`);
   }
 
   const nextTimeline: Timeline = {
@@ -240,11 +247,16 @@ export function removeClip(
 
   const validation = validateTimeline(nextTimeline, options);
   if (!validation.valid) {
-    throw new TimelineValidationError("Failed to remove clip: validation error.", validation.errors);
+    throw new TimelineValidationError("Failed to delete clip: validation error.", validation.errors);
   }
 
   return nextTimeline;
 }
+
+/**
+ * Alias for deleteClip for backwards compatibility.
+ */
+export const removeClip = deleteClip;
 
 /**
  * Moves a clip to a new timeline start position, optionally changing its track, immutably.

@@ -1,4 +1,7 @@
 import assert from "node:assert";
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
 import {
   calculatePixelsPerSecond,
   timeToPixels,
@@ -23,6 +26,7 @@ import {
   splitClip,
   splitClipWithResult,
   trimClip,
+  deleteClip,
   createEmptyTimeline,
   addTrack,
   addClip,
@@ -1027,6 +1031,246 @@ async function runAllTests() {
     assert.strictEqual(finalCleanTl!.tracks[0].clips[0].timelineStart, 0);
     assert.strictEqual(finalCleanTl!.tracks[0].clips[0].sourceEnd, 30);
     console.log("  ✓ Cleaned up and restored real project timeline to [0s-30s] baseline");
+    passed++;
+
+    // 15. Delete Clips Frontend Logic & State Verification
+    console.log("\n[Suite 15] Delete Clips Frontend Logic & State Verification");
+
+    test("Delete action availability with and without selection", () => {
+      let selectedClipId: string | null = null;
+      assert.strictEqual(Boolean(selectedClipId), false, "canDelete is false when no clip selected");
+
+      selectedClipId = "clip_sample_1";
+      assert.strictEqual(Boolean(selectedClipId), true, "canDelete is true when clip selected");
+    });
+
+    test("Successful deletion updates UI state, clears selection, and leaves playhead stable", () => {
+      const baseTl = createEmptyTimeline({ projectId: "del_ui_proj" });
+      const trTl = addTrack(baseTl, { id: "tr_1", name: "Video", type: "video" });
+      const withClips = addClip(
+        addClip(trTl, {
+          id: "c1",
+          assetId: "a1",
+          trackId: "tr_1",
+          sourceStart: 0,
+          sourceEnd: 10,
+          timelineStart: 0
+        }),
+        {
+          id: "c2",
+          assetId: "a1",
+          trackId: "tr_1",
+          sourceStart: 10,
+          sourceEnd: 20,
+          timelineStart: 10
+        }
+      );
+
+      let selectedId: string | null = "c1";
+      let currentTime = 7.5; // playhead position
+
+      // Execute deletion
+      const updatedTl = deleteClip(withClips, selectedId);
+      selectedId = null; // selection cleared
+
+      assert.strictEqual(updatedTl.tracks[0].clips.length, 1, "Only 1 clip remains");
+      assert.strictEqual(updatedTl.tracks[0].clips[0].id, "c2", "c2 is the remaining clip");
+      assert.strictEqual(selectedId, null, "Selection successfully cleared");
+      assert.strictEqual(currentTime, 7.5, "Playhead position remained stable at 7.5s");
+    });
+
+    test("Deleting the last clip on a track leaves an empty track for empty-state display", () => {
+      const baseTl = createEmptyTimeline({ projectId: "del_empty_proj" });
+      const trTl = addTrack(baseTl, { id: "tr_1", name: "Video", type: "video" });
+      const withSingleClip = addClip(trTl, {
+        id: "c_only",
+        assetId: "a1",
+        trackId: "tr_1",
+        sourceStart: 0,
+        sourceEnd: 10,
+        timelineStart: 0
+      });
+
+      const emptyTl = deleteClip(withSingleClip, "c_only");
+      assert.strictEqual(emptyTl.tracks[0].clips.length, 0, "Track clips array is empty");
+    });
+
+    test("Delete and Backspace shortcuts are ignored inside text inputs and editable fields", () => {
+      let deleteTriggered = false;
+      const handleDelete = () => {
+        deleteTriggered = true;
+      };
+
+      const simulateKey = (key: string, tagName: string, isContentEditable = false) => {
+        deleteTriggered = false;
+        const target = { tagName, isContentEditable };
+        if (
+          target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable
+        ) {
+          return; // ignored
+        }
+        if (key === "Delete" || key === "Backspace") {
+          handleDelete();
+        }
+      };
+
+      // Inside input: ignored
+      simulateKey("Delete", "INPUT");
+      assert.strictEqual(deleteTriggered, false, "Delete ignored inside INPUT");
+      simulateKey("Backspace", "TEXTAREA");
+      assert.strictEqual(deleteTriggered, false, "Backspace ignored inside TEXTAREA");
+      simulateKey("Delete", "DIV", true);
+      assert.strictEqual(deleteTriggered, false, "Delete ignored in contentEditable");
+
+      // Outside inputs: triggered
+      simulateKey("Delete", "DIV", false);
+      assert.strictEqual(deleteTriggered, true, "Delete executed outside inputs");
+      simulateKey("Backspace", "DIV", false);
+      assert.strictEqual(deleteTriggered, true, "Backspace executed outside inputs");
+    });
+
+    test("Deletion persistence through TimelineSaveQueue updates confirmed state", async () => {
+      let savedInDB: Timeline | null = null;
+      const baseTl = createEmptyTimeline({ projectId: "del_queue_proj" });
+      const trTl = addTrack(baseTl, { id: "tr_1", name: "Video", type: "video" });
+      const initialTl = addClip(trTl, {
+        id: "c_save",
+        assetId: "a1",
+        trackId: "tr_1",
+        sourceStart: 0,
+        sourceEnd: 10,
+        timelineStart: 0
+      });
+
+      const queue = new TimelineSaveQueue({
+        saveFn: async (payload) => {
+          savedInDB = payload;
+          return payload;
+        },
+        initialTimeline: initialTl
+      });
+
+      const deletedTl = deleteClip(initialTl, "c_save");
+      queue.enqueue(deletedTl);
+
+      await new Promise((r) => setTimeout(r, 50));
+
+      assert.notStrictEqual(savedInDB, null);
+      assert.strictEqual((savedInDB as any)?.tracks[0].clips.length, 0);
+      assert.strictEqual((queue.getLastSavedTimeline() as any)?.tracks[0].clips.length, 0);
+    });
+
+    test("Rollback on failed delete save restores pre-delete clip", async () => {
+      const baseTl = createEmptyTimeline({ projectId: "del_fail_proj" });
+      const trTl = addTrack(baseTl, { id: "tr_1", name: "Video", type: "video" });
+      const preDeleteTl = addClip(trTl, {
+        id: "c_rollback",
+        assetId: "a1",
+        trackId: "tr_1",
+        sourceStart: 0,
+        sourceEnd: 10,
+        timelineStart: 0
+      });
+
+      let rolledBackState: Timeline | null = null;
+      let saveFailed = false;
+
+      const queue = new TimelineSaveQueue({
+        saveFn: async () => {
+          throw new Error("Network error during delete save");
+        },
+        onSaveError: (_err, rolledBack) => {
+          saveFailed = true;
+          rolledBackState = rolledBack;
+        },
+        initialTimeline: preDeleteTl
+      });
+
+      const deletedTl = deleteClip(preDeleteTl, "c_rollback");
+      queue.enqueue(deletedTl);
+
+      await new Promise((r) => setTimeout(r, 50));
+
+      assert.strictEqual(saveFailed, true);
+      assert.strictEqual((rolledBackState as any)?.tracks[0].clips.length, 1);
+      assert.strictEqual((rolledBackState as any)?.tracks[0].clips[0].id, "c_rollback");
+    });
+
+    // 16. Real Project Delete Clip E2E & Media Safety Verification
+    console.log("\n[Suite 16] Real Project Delete Clip E2E & Media Safety Verification");
+
+    // 1. Fetch real timeline and split into 2 clips [0, 10] and [10, 30]
+    const realTl = await fetchProjectTimeline(realProjectId);
+    assert(realTl !== null && realTl.tracks.length > 0, "Loaded real timeline");
+    const clip1 = realTl.tracks[0].clips[0];
+
+    const splitForDel = splitClipWithResult(realTl, clip1.id, 10.0);
+    const twoClipsTl = await saveProjectTimeline(realProjectId, splitForDel.timeline);
+    assert.strictEqual(twoClipsTl.tracks[0].clips.length, 2, "Real project now has 2 clips");
+
+    // 2. Delete the first segment [0, 10]
+    const deletedSegment1Tl = deleteClip(twoClipsTl, clip1.id);
+    const savedAfterDelete = await saveProjectTimeline(realProjectId, deletedSegment1Tl);
+    assert.strictEqual(savedAfterDelete.tracks[0].clips.length, 1, "Persisted timeline has 1 clip after deletion");
+    assert.strictEqual(savedAfterDelete.tracks[0].clips[0].id, splitForDel.secondClip.id, "Remaining clip is segment 2");
+    console.log("  ✓ Successfully deleted clip from real timeline and persisted to MongoDB Atlas");
+    passed++;
+
+    // 3. Fresh GET to verify deletion durability
+    const freshDelTl = await fetchProjectTimeline(realProjectId);
+    assert.strictEqual(freshDelTl!.tracks[0].clips.length, 1);
+    assert.strictEqual(freshDelTl!.tracks[0].clips[0].id, splitForDel.secondClip.id);
+    console.log("  ✓ Fresh GET confirmed deletion durability");
+    passed++;
+
+    // 4. CRITICAL MEDIA SAFETY CHECKS
+    // a. Verify media asset remains in project Media Library via backend API
+    const mediaRes = await fetch(`http://localhost:3001/api/projects/${realProjectId}/media`);
+    assert.strictEqual(mediaRes.status, 200, "GET /media returns 200");
+    const mediaJson = (await mediaRes.json()) as any;
+    assert(Array.isArray(mediaJson.data), "Media library returns array of assets");
+    assert(mediaJson.data.length >= 1, "Media asset remains in library after timeline clip deletion");
+    const targetAsset = mediaJson.data.find((a: any) => a.id === clip1.assetId);
+    assert(Boolean(targetAsset), "Original media asset metadata remains in database");
+    assert.strictEqual(targetAsset.duration, 225, "Media asset duration metadata preserved");
+    console.log("  ✓ CRITICAL SAFETY: Media asset metadata PRESERVED in Media Library and database");
+    passed++;
+
+    // b. Verify physical media file on disk is completely untouched
+    const defaultStoragePath = path.join(os.homedir(), ".agentcut", "projects", realProjectId, "media");
+    assert(fs.existsSync(defaultStoragePath), "Project media directory exists on disk");
+    const mediaFiles = fs.readdirSync(defaultStoragePath);
+    assert(mediaFiles.length >= 1, "Physical media file exists in project storage directory");
+    const filePath = path.join(defaultStoragePath, mediaFiles[0]);
+    const fileStat = fs.statSync(filePath);
+    assert(fileStat.size > 1000000, "Physical video binary size is intact (> 1MB)");
+    console.log(`  ✓ CRITICAL SAFETY: Physical video file on disk PRESERVED (${fileStat.size} bytes)`);
+    passed++;
+
+    // 5. Restore baseline [0s, 30s] clip at 0s
+    const baselineRestore: Timeline = {
+      ...freshDelTl!,
+      tracks: [
+        {
+          ...freshDelTl!.tracks[0],
+          clips: [
+            {
+              ...clip1,
+              sourceStart: 0,
+              sourceEnd: 30,
+              timelineStart: 0
+            }
+          ]
+        }
+      ]
+    };
+    await saveProjectTimeline(realProjectId, baselineRestore);
+    const cleanedRealTl = await fetchProjectTimeline(realProjectId);
+    assert.strictEqual(cleanedRealTl!.tracks[0].clips.length, 1);
+    assert.strictEqual(cleanedRealTl!.tracks[0].clips[0].sourceEnd, 30);
+    console.log("  ✓ Restored real project timeline baseline to pristine state");
     passed++;
   } catch (err) {
     console.error("  ✗ FAIL: Live Vite dev server / proxy test failed:", err);

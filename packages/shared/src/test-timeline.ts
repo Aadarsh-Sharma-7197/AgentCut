@@ -3,6 +3,7 @@ import {
   addTrack,
   addClip,
   removeClip,
+  deleteClip,
   moveClip,
   splitClip,
   splitClipWithResult,
@@ -781,6 +782,88 @@ function runTimelineTests() {
   // 12. Resulting timeline validation
   const validationOfTrim = validateTimeline(leftTrimmed, { assets: [videoAsset] });
   assert(validationOfTrim.valid, "Resulting trimmed timeline passes validateTimeline");
+
+  // ==========================================
+  // [Test 16] Delete Clip Operation (deleteClip)
+  // ==========================================
+  console.log("\n[Test 16] Delete Clip Operation (deleteClip)");
+
+  const delBaseTl = createEmptyTimeline({
+    projectId: "del_proj_1",
+    id: "tl_del_1",
+    settings: { frameRate: 60, width: 3840, height: 2160 }
+  });
+  const delTrackV1 = addTrack(delBaseTl, { id: "tr_del_v1", name: "Video Track 1", type: "video" });
+  const delTrackV2 = addTrack(delTrackV1, { id: "tr_del_v2", name: "Video Track 2", type: "video" });
+
+  const delClip1 = addClip(delTrackV2, {
+    id: "c_del_1",
+    assetId: videoAsset.id,
+    trackId: "tr_del_v1",
+    sourceStart: 0,
+    sourceEnd: 10,
+    timelineStart: 0,
+    name: "Clip 1"
+  });
+  const delClip2 = addClip(delClip1, {
+    id: "c_del_2",
+    assetId: videoAsset.id,
+    trackId: "tr_del_v1",
+    sourceStart: 10,
+    sourceEnd: 20,
+    timelineStart: 10,
+    name: "Clip 2"
+  });
+  const delClip3OnTrack2 = addClip(delClip2, {
+    id: "c_del_track2",
+    assetId: videoAsset.id,
+    trackId: "tr_del_v2",
+    sourceStart: 0,
+    sourceEnd: 15,
+    timelineStart: 0,
+    name: "Clip on Track 2"
+  });
+
+  // 1. Deleting from a track containing multiple clips
+  const afterDel1 = deleteClip(delClip3OnTrack2, "c_del_1", { assets: [videoAsset] });
+  assert(afterDel1.tracks[0].clips.length === 1, "Track 1 now has 1 clip remaining");
+  assert(afterDel1.tracks[0].clips[0].id === "c_del_2", "Remaining clip on Track 1 is c_del_2");
+  assert(afterDel1.tracks[0].clips[0].name === "Clip 2", "Preserves remaining clip metadata");
+  assert(afterDel1.tracks[0].clips[0].sourceStart === 10 && afterDel1.tracks[0].clips[0].sourceEnd === 20, "Preserves remaining clip source range");
+
+  // 2. Deleting from one track without affecting other tracks
+  assert(afterDel1.tracks[1].clips.length === 1, "Track 2 clips count unaffected");
+  assert(afterDel1.tracks[1].clips[0].id === "c_del_track2", "Track 2 clip unchanged");
+
+  // 3. Deleting the only clip on a track (empty track result)
+  const afterDelTrack2Clip = deleteClip(afterDel1, "c_del_track2", { assets: [videoAsset] });
+  assert(afterDelTrack2Clip.tracks[1].clips.length === 0, "Track 2 is now empty");
+  assert(afterDelTrack2Clip.tracks[0].clips.length === 1, "Track 1 still has its clip");
+
+  // 4. Preserving timeline settings and metadata
+  assert(afterDel1.settings.frameRate === 60, "Settings frameRate preserved (60 fps)");
+  assert(afterDel1.settings.width === 3840 && afterDel1.settings.height === 2160, "Settings resolution preserved");
+  assert(afterDel1.id === "tl_del_1", "Timeline ID preserved");
+  assert(afterDel1.projectId === "del_proj_1", "Project ID preserved");
+
+  // 5. Rejecting nonexistent clip IDs
+  let delNonexistentThrew = false;
+  try {
+    deleteClip(afterDel1, "ghost_clip_id");
+  } catch (e: any) {
+    delNonexistentThrew = true;
+    assert(e.message.includes("Cannot delete clip: clip 'ghost_clip_id' was not found in timeline."), "Clear error message on missing clip ID");
+  }
+  assert(delNonexistentThrew, "Rejects nonexistent clip ID");
+
+  // 6. Original timeline immutability
+  assert(delClip3OnTrack2.tracks[0].clips.length === 2, "Original timeline Track 1 still has 2 clips");
+  assert(delClip3OnTrack2.tracks[1].clips.length === 1, "Original timeline Track 2 still has 1 clip");
+
+  // 7. Resulting timeline validation
+  const validationOfDel = validateTimeline(afterDelTrack2Clip, { assets: [videoAsset] });
+  assert(validationOfDel.valid, "Resulting timeline after deletions passes validateTimeline");
+  assert(validationOfDel.errors.length === 0, "Zero validation errors on deleted timeline");
 
   console.log(`\n=== Timeline Test Results: ${passed} passed, ${failed} failed ===`);
   if (failed > 0) {

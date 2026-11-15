@@ -11,6 +11,8 @@ interface TimelineToolbarProps {
   saveError?: string | null;
   canSplit?: boolean;
   onSplit?: () => void;
+  canDelete?: boolean;
+  onDelete?: () => void;
   onZoomChange: (newZoom: number) => void;
   onResetZoom: () => void;
 }
@@ -23,6 +25,8 @@ export const TimelineToolbar: React.FC<TimelineToolbarProps> = ({
   saveError,
   canSplit = false,
   onSplit,
+  canDelete = false,
+  onDelete,
   onZoomChange,
   onResetZoom
 }) => {
@@ -75,6 +79,18 @@ export const TimelineToolbar: React.FC<TimelineToolbarProps> = ({
           }
         >
           ✂ Split
+        </button>
+        <button
+          className="delete-btn"
+          onClick={onDelete}
+          disabled={!canDelete}
+          title={
+            canDelete
+              ? "Delete selected clip (Shortcut: Delete / Backspace)"
+              : "Select a clip to delete"
+          }
+        >
+          🗑️ Delete
         </button>
       </div>
 
