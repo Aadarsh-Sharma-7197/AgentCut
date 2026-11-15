@@ -1,6 +1,13 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import type { Timeline, MediaAsset, Clip, Track } from "@agentcut/shared";
-import { getTimelineDuration, moveClip, splitClipWithResult, trimClip, deleteClip } from "@agentcut/shared";
+import {
+  getTimelineDuration,
+  moveClip,
+  splitClipWithResult,
+  trimClip,
+  deleteClip,
+  TimelineHistory
+} from "@agentcut/shared";
 import { fetchProjectTimeline, saveProjectTimeline } from "../../api/timeline";
 import { TimelineSaveQueue } from "../../utils/timelineSaveQueue";
 import {
@@ -74,20 +81,39 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
   const saveQueueRef = useRef<TimelineSaveQueue | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
+  // Undo/Redo history
+  const historyRef = useRef<TimelineHistory>(new TimelineHistory({ maxHistory: 50 }));
+  const [canUndo, setCanUndo] = useState<boolean>(false);
+  const [canRedo, setCanRedo] = useState<boolean>(false);
+
+  const updateHistoryFlags = useCallback(() => {
+    if (historyRef.current) {
+      setCanUndo(historyRef.current.canUndo());
+      setCanRedo(historyRef.current.canRedo());
+    }
+  }, []);
+
   const loadTimeline = useCallback(async () => {
     setIsLoading(true);
     setError(null);
     try {
+      if (saveQueueRef.current && saveQueueRef.current.isBusy()) {
+        await saveQueueRef.current.waitForIdle();
+      }
       const data = await fetchProjectTimeline(projectId);
       setTimeline(data);
-      saveQueueRef.current?.setLastSavedTimeline(data);
+      if (data) {
+        historyRef.current.init(data);
+        updateHistoryFlags();
+        saveQueueRef.current?.setLastSavedTimeline(data);
+      }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Failed to load project timeline.";
       setError(msg);
     } finally {
       setIsLoading(false);
     }
-  }, [projectId]);
+  }, [projectId, updateHistoryFlags]);
 
   useEffect(() => {
     loadTimeline();
@@ -164,6 +190,8 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
       onSaveError: (err, rolledBackTimeline) => {
         if (rolledBackTimeline) {
           setTimeline(rolledBackTimeline);
+          historyRef.current.reconcile(rolledBackTimeline);
+          updateHistoryFlags();
         }
         setSaveStatus("error");
         setSaveError(err.message || "Failed to save timeline.");
@@ -191,6 +219,36 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
     []
   );
 
+  const handleUndo = useCallback(() => {
+    if (!historyRef.current.canUndo()) return;
+    const prev = historyRef.current.undo();
+    if (prev) {
+      updateHistoryFlags();
+      persistTimeline(prev);
+      setSelectedClipId((currentSelected) => {
+        if (!currentSelected) return null;
+        const exists = prev.tracks.some((t) => t.clips.some((c) => c.id === currentSelected));
+        return exists ? currentSelected : null;
+      });
+      setNoticeMessage(null);
+    }
+  }, [persistTimeline, updateHistoryFlags]);
+
+  const handleRedo = useCallback(() => {
+    if (!historyRef.current.canRedo()) return;
+    const next = historyRef.current.redo();
+    if (next) {
+      updateHistoryFlags();
+      persistTimeline(next);
+      setSelectedClipId((currentSelected) => {
+        if (!currentSelected) return null;
+        const exists = next.tracks.some((t) => t.clips.some((c) => c.id === currentSelected));
+        return exists ? currentSelected : null;
+      });
+      setNoticeMessage(null);
+    }
+  }, [persistTimeline, updateHistoryFlags]);
+
   // Split operation condition: clip selected AND currentTime strictly inside clip interval
   const canSplit = useMemo(() => {
     if (!selectedClipInfo) return false;
@@ -207,10 +265,14 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
         assets: mediaAssets
       });
 
-      // 1. Optimistic UI update & serialized persistence
+      // 1. Push to history & update undo/redo flags
+      historyRef.current.push(result.timeline);
+      updateHistoryFlags();
+
+      // 2. Optimistic UI update & serialized persistence
       persistTimeline(result.timeline);
 
-      // 2. Select the second clip segment as preferred by requirements
+      // 3. Select the second clip segment as preferred by requirements
       setSelectedClipId(result.secondClip.id);
       setNoticeMessage(null);
     } catch (err: unknown) {
@@ -218,13 +280,17 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
       setNoticeMessage(msg);
       setTimeout(() => setNoticeMessage(null), 3500);
     }
-  }, [timeline, selectedClipId, canSplit, currentTime, mediaAssets, persistTimeline]);
+  }, [timeline, selectedClipId, canSplit, currentTime, mediaAssets, persistTimeline, updateHistoryFlags]);
 
   const handleDeleteSelectedClip = useCallback(() => {
     if (!timeline || !selectedClipId) return;
     try {
       const updated = deleteClip(timeline, selectedClipId, { assets: mediaAssets });
-      // Optimistic UI update & serialized queue persistence
+      // 1. Push to history & update undo/redo flags
+      historyRef.current.push(updated);
+      updateHistoryFlags();
+
+      // 2. Optimistic UI update & serialized queue persistence
       persistTimeline(updated);
       setSelectedClipId(null);
       setNoticeMessage(null);
@@ -233,9 +299,13 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
       setNoticeMessage(msg);
       setTimeout(() => setNoticeMessage(null), 3500);
     }
-  }, [timeline, selectedClipId, mediaAssets, persistTimeline]);
+  }, [timeline, selectedClipId, mediaAssets, persistTimeline, updateHistoryFlags]);
 
-  // Keyboard shortcuts: Press 'S' to split, 'Delete' or 'Backspace' to delete selected clip
+  // Keyboard shortcuts:
+  // - Ctrl+Z / Cmd+Z to undo
+  // - Ctrl+Shift+Z / Cmd+Shift+Z or Ctrl+Y / Cmd+Y to redo
+  // - 'S' to split
+  // - 'Delete' or 'Backspace' to delete selected clip
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -245,6 +315,23 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
           target.tagName === "TEXTAREA" ||
           target.isContentEditable)
       ) {
+        return;
+      }
+
+      // Undo: Ctrl+Z / Cmd+Z (without Shift)
+      if ((e.key === "z" || e.key === "Z") && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        handleUndo();
+        return;
+      }
+
+      // Redo: Ctrl+Shift+Z / Cmd+Shift+Z or Ctrl+Y / Cmd+Y
+      if (
+        ((e.key === "z" || e.key === "Z") && (e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey) ||
+        ((e.key === "y" || e.key === "Y") && (e.ctrlKey || e.metaKey) && !e.altKey)
+      ) {
+        e.preventDefault();
+        handleRedo();
         return;
       }
 
@@ -270,7 +357,14 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [canSplit, handleSplitClip, selectedClipId, handleDeleteSelectedClip]);
+  }, [
+    canSplit,
+    handleSplitClip,
+    selectedClipId,
+    handleDeleteSelectedClip,
+    handleUndo,
+    handleRedo
+  ]);
 
   // Trimming interaction handlers
   const handleClipTrimStart = (
@@ -448,6 +542,8 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
               finalTrimTime,
               { assets: mediaAssets }
             );
+            historyRef.current.push(updated);
+            updateHistoryFlags();
             persistTimeline(updated);
           } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : "Failed to trim clip.";
@@ -485,6 +581,8 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
               dragState.targetTrackId,
               { assets: mediaAssets }
             );
+            historyRef.current.push(updated);
+            updateHistoryFlags();
             persistTimeline(updated);
           } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : "Failed to move clip.";
@@ -567,6 +665,10 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
         zoom={zoom}
         saveStatus={saveStatus}
         saveError={saveError}
+        canUndo={canUndo}
+        canRedo={canRedo}
+        onUndo={handleUndo}
+        onRedo={handleRedo}
         canSplit={canSplit}
         onSplit={handleSplitClip}
         canDelete={Boolean(selectedClipId)}

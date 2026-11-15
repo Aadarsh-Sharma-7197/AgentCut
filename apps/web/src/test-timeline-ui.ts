@@ -31,6 +31,7 @@ import {
   addTrack,
   addClip,
   validateTimeline,
+  TimelineHistory,
   type Clip,
   type Timeline,
   type MediaAsset
@@ -1272,6 +1273,548 @@ async function runAllTests() {
     assert.strictEqual(cleanedRealTl!.tracks[0].clips[0].sourceEnd, 30);
     console.log("  ✓ Restored real project timeline baseline to pristine state");
     passed++;
+
+    // 17. Timeline Undo/Redo Frontend Logic & State Verification
+    console.log("\n[Suite 17] Timeline Undo/Redo Frontend Logic & State Verification");
+
+    // 1. History initialization with real timeline baseline
+    const testTlBase = cleanedRealTl!;
+    const historyManager = new TimelineHistory({ maxHistory: 50, initialTimeline: testTlBase });
+    assert.strictEqual(historyManager.canUndo(), false, "Initial canUndo is false");
+    assert.strictEqual(historyManager.canRedo(), false, "Initial canRedo is false");
+    console.log("  ✓ Initial history state disables undo and redo");
+    passed++;
+
+    // 2. Move operation undo/redo
+    const movedState = moveClip(testTlBase, clip1.id, 12.0);
+    historyManager.push(movedState);
+    assert.strictEqual(historyManager.canUndo(), true, "canUndo is true after move");
+    assert.strictEqual(historyManager.canRedo(), false, "canRedo is false after new move");
+    assert.strictEqual(historyManager.getCurrent()?.tracks[0].clips[0].timelineStart, 12.0);
+
+    const undoneMove = historyManager.undo();
+    assert.strictEqual(undoneMove?.tracks[0].clips[0].timelineStart, 0, "Undo move restores original timelineStart (0)");
+    assert.strictEqual(historyManager.canUndo(), false, "canUndo is false after undoing to baseline");
+    assert.strictEqual(historyManager.canRedo(), true, "canRedo is true after undo");
+
+    const redoneMove = historyManager.redo();
+    assert.strictEqual(redoneMove?.tracks[0].clips[0].timelineStart, 12.0, "Redo move re-applies moved timelineStart (12.0)");
+    console.log("  ✓ Move clip Undo and Redo accurately restore positions");
+    passed++;
+
+    // 3. Split operation undo/redo
+    const splitState = splitClip(redoneMove!, clip1.id, 20.0);
+    historyManager.push(splitState);
+    assert.strictEqual(splitState.tracks[0].clips.length, 2, "Split state has 2 clips");
+
+    const undoneSplit = historyManager.undo();
+    assert.strictEqual(undoneSplit?.tracks[0].clips.length, 1, "Undo split restores single clip");
+    assert.strictEqual(undoneSplit?.tracks[0].clips[0].id, clip1.id, "Restored clip has original ID");
+
+    const redoneSplit = historyManager.redo();
+    assert.strictEqual(redoneSplit?.tracks[0].clips.length, 2, "Redo split restores 2 clips");
+    console.log("  ✓ Split clip Undo restores original single clip, Redo restores segments");
+    passed++;
+
+    // 4. Trim operation undo/redo
+    const trimmedState = trimClip(redoneSplit!, clip1.id, "right", 16.0);
+    historyManager.push(trimmedState);
+    assert.strictEqual(trimmedState.tracks[0].clips[0].sourceEnd, 4.0, "Trimmed clip sourceEnd updated");
+
+    const undoneTrim = historyManager.undo();
+    assert.strictEqual(undoneTrim?.tracks[0].clips[0].sourceEnd, 8.0, "Undo trim restores pre-trim sourceEnd");
+
+    const redoneTrim = historyManager.redo();
+    assert.strictEqual(redoneTrim?.tracks[0].clips[0].sourceEnd, 4.0, "Redo trim restores trimmed sourceEnd");
+    console.log("  ✓ Trim clip Undo restores bounds, Redo re-applies trim");
+    passed++;
+
+    // 5. Delete operation undo/redo
+    const deletedState = deleteClip(redoneTrim!, clip1.id);
+    historyManager.push(deletedState);
+    assert.strictEqual(deletedState.tracks[0].clips.length, 1, "Deleted state has 1 clip remaining");
+
+    const undoneDelete = historyManager.undo();
+    assert.strictEqual(undoneDelete?.tracks[0].clips.length, 2, "Undo delete restores the deleted clip");
+    assert.strictEqual(undoneDelete?.tracks[0].clips[0].id, clip1.id, "Restored clip preserves ID");
+
+    const redoneDelete = historyManager.redo();
+    assert.strictEqual(redoneDelete?.tracks[0].clips.length, 1, "Redo delete removes clip again");
+    console.log("  ✓ Delete clip Undo restores clip, Redo re-deletes clip");
+    passed++;
+
+    // 6. Redo branch invalidation on new edit
+    historyManager.undo(); // back to 2 clips
+    assert.strictEqual(historyManager.canRedo(), true, "canRedo is true before branch invalidation");
+    const alternativeEdit = moveClip(historyManager.getCurrent()!, clip1.id, 5.0);
+    historyManager.push(alternativeEdit);
+    assert.strictEqual(historyManager.canRedo(), false, "Redo branch discarded after new edit");
+    assert.strictEqual(historyManager.getRedoCount(), 0, "Redo count is 0 after new edit");
+    console.log("  ✓ Redo branch invalidation correctly clears abandoned redo states");
+    passed++;
+
+    // 7. SaveQueue Coalescing with Rapid Undo/Redo
+    let saveCount = 0;
+    const saveCalls: Timeline[] = [];
+    const queue = new TimelineSaveQueue({
+      saveFn: async (payload) => {
+        saveCount++;
+        saveCalls.push(payload);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        return payload;
+      },
+      initialTimeline: testTlBase
+    });
+
+    // Rapid successive undos enqueued into save queue
+    queue.enqueue(testTlBase);
+    queue.enqueue(movedState);
+    queue.enqueue(testTlBase); // Rapid undo back to base
+
+    while (queue.isBusy()) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    assert(saveCount <= 2, `Rapid undo/redo was coalesced cleanly (${saveCount} saves executed)`);
+    assert.strictEqual(
+      saveCalls[saveCalls.length - 1].tracks[0].clips[0].timelineStart,
+      0,
+      "Final saved state matches trailing undo state"
+    );
+    console.log("  ✓ SaveQueue coalesces rapid undo/redo without out-of-order writes");
+    passed++;
+
+    // 8. Error reconciliation
+    let rolledBack: Timeline | null = null;
+    const failQueue = new TimelineSaveQueue({
+      saveFn: async () => {
+        throw new Error("Simulated network timeout");
+      },
+      onSaveError: (_err, rolledBackTl) => {
+        if (rolledBackTl) rolledBack = rolledBackTl;
+      },
+      initialTimeline: testTlBase
+    });
+
+    failQueue.enqueue(movedState);
+    while (failQueue.isBusy()) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert(rolledBack !== null, "Queue rolled back on network failure");
+    historyManager.reconcile(rolledBack!);
+    assert.strictEqual(
+      historyManager.getCurrent()?.tracks[0].clips[0].timelineStart,
+      0,
+      "History reconciled to confirmed server timeline on failure"
+    );
+    console.log("  ✓ Error reconciliation safely aligns history stack with rolled-back server state");
+    passed++;
+
+    // 18. Real Project Undo/Redo E2E Persistence Verification
+    console.log("\n[Suite 18] Real Project Undo/Redo E2E Persistence Verification");
+
+    // 1. Start from confirmed baseline
+    const liveBaseline = await fetchProjectTimeline(realProjectId);
+    assert(liveBaseline !== null, "Live baseline loaded");
+    const liveClip = liveBaseline.tracks[0].clips[0];
+    const liveHistory = new TimelineHistory({ initialTimeline: liveBaseline });
+
+    // 2. Perform Move on real project -> Persist
+    const liveMoved = moveClip(liveBaseline, liveClip.id, 15.0);
+    liveHistory.push(liveMoved);
+    await saveProjectTimeline(realProjectId, liveMoved);
+    const getAfterMove = await fetchProjectTimeline(realProjectId);
+    assert.strictEqual(getAfterMove!.tracks[0].clips[0].timelineStart, 15.0, "Move persisted to MongoDB Atlas");
+
+    // 3. Undo Move -> Persist undone state to MongoDB
+    const liveUndoneMove = liveHistory.undo()!;
+    await saveProjectTimeline(realProjectId, liveUndoneMove);
+    const getAfterUndoMove = await fetchProjectTimeline(realProjectId);
+    assert.strictEqual(getAfterUndoMove!.tracks[0].clips[0].timelineStart, 0, "Undo move persisted to MongoDB (start: 0)");
+    console.log("  ✓ Real project Move Undo persisted and verified via fresh GET");
+    passed++;
+
+    // 4. Redo Move -> Persist redone state to MongoDB
+    const liveRedoneMove = liveHistory.redo()!;
+    await saveProjectTimeline(realProjectId, liveRedoneMove);
+    const getAfterRedoMove = await fetchProjectTimeline(realProjectId);
+    assert.strictEqual(getAfterRedoMove!.tracks[0].clips[0].timelineStart, 15.0, "Redo move persisted to MongoDB (start: 15)");
+    console.log("  ✓ Real project Move Redo persisted and verified via fresh GET");
+    passed++;
+
+    // 5. Perform Split -> Persist
+    const liveSplit = splitClip(liveRedoneMove, liveClip.id, 25.0);
+    liveHistory.push(liveSplit);
+    await saveProjectTimeline(realProjectId, liveSplit);
+    const getAfterSplit = await fetchProjectTimeline(realProjectId);
+    assert.strictEqual(getAfterSplit!.tracks[0].clips.length, 2, "Split persisted (2 clips)");
+
+    // 6. Undo Split -> Persist undone state (1 clip restored)
+    const liveUndoneSplit = liveHistory.undo()!;
+    await saveProjectTimeline(realProjectId, liveUndoneSplit);
+    const getAfterUndoSplit = await fetchProjectTimeline(realProjectId);
+    assert.strictEqual(getAfterUndoSplit!.tracks[0].clips.length, 1, "Undo split persisted (1 clip restored)");
+    assert.strictEqual(getAfterUndoSplit!.tracks[0].clips[0].id, liveClip.id);
+    console.log("  ✓ Real project Split Undo restores single original clip in MongoDB");
+    passed++;
+
+    // 7. Redo Split -> Persist redone state (2 clips restored)
+    const liveRedoneSplit = liveHistory.redo()!;
+    await saveProjectTimeline(realProjectId, liveRedoneSplit);
+    const getAfterRedoSplit = await fetchProjectTimeline(realProjectId);
+    assert.strictEqual(getAfterRedoSplit!.tracks[0].clips.length, 2, "Redo split persisted (2 clips restored)");
+    console.log("  ✓ Real project Split Redo restores both clip segments in MongoDB");
+    passed++;
+
+    // 8. Delete segment 2 -> Persist
+    const seg2Id = getAfterRedoSplit!.tracks[0].clips[1].id;
+    const liveDeleted = deleteClip(getAfterRedoSplit!, seg2Id);
+    liveHistory.push(liveDeleted);
+    await saveProjectTimeline(realProjectId, liveDeleted);
+    const getAfterDelete = await fetchProjectTimeline(realProjectId);
+    assert.strictEqual(getAfterDelete!.tracks[0].clips.length, 1, "Delete persisted (1 clip)");
+
+    // 9. Undo Delete -> Persist (segment 2 restored in MongoDB)
+    const liveUndoneDelete = liveHistory.undo()!;
+    await saveProjectTimeline(realProjectId, liveUndoneDelete);
+    const getAfterUndoDelete = await fetchProjectTimeline(realProjectId);
+    assert.strictEqual(getAfterUndoDelete!.tracks[0].clips.length, 2, "Undo delete restored segment 2 in MongoDB");
+    assert(getAfterUndoDelete!.tracks[0].clips.some((c) => c.id === seg2Id), "Exact deleted clip ID restored");
+    console.log("  ✓ Real project Delete Undo restored deleted clip in MongoDB");
+    passed++;
+
+    // 10. CRITICAL MEDIA SAFETY: Verify physical media file on disk is untouched
+    const diskMediaDir = path.join(os.homedir(), ".agentcut", "projects", realProjectId, "media");
+    const diskFiles = fs.readdirSync(diskMediaDir);
+    assert(diskFiles.length >= 1, "Video file exists on disk");
+    const videoDiskStat = fs.statSync(path.join(diskMediaDir, diskFiles[0]));
+    assert(videoDiskStat.size > 1000000, "Video size intact (> 1MB)");
+    console.log(`  ✓ CRITICAL SAFETY: Physical video file intact after undo/redo cycles (${videoDiskStat.size} bytes)`);
+    passed++;
+
+    // 11. Restore pristine baseline [0, 30] clip at 0s
+    const finalCleanBaseline: Timeline = {
+      ...liveBaseline,
+      tracks: [
+        {
+          ...liveBaseline.tracks[0],
+          clips: [
+            {
+              ...liveClip,
+              sourceStart: 0,
+              sourceEnd: 30,
+              timelineStart: 0
+            }
+          ]
+        }
+      ]
+    };
+    await saveProjectTimeline(realProjectId, finalCleanBaseline);
+    const finalVerification = await fetchProjectTimeline(realProjectId);
+    assert.strictEqual(finalVerification!.tracks[0].clips.length, 1);
+    assert.strictEqual(finalVerification!.tracks[0].clips[0].timelineStart, 0);
+    assert.strictEqual(finalVerification!.tracks[0].clips[0].sourceEnd, 30);
+    console.log("  ✓ Pristine baseline restored to MongoDB");
+    passed++;
+
+    // 19. Review Scenarios: Comprehensive Undo/Redo Concurrency, Failure, and Reload Regression Tests
+    console.log("\n[Suite 19] Review Scenarios: Undo/Redo Concurrency, Failure, and Reload Regression Tests");
+
+    // Scenario 1: User performs three edits rapidly while saves are pending
+    {
+      const s0 = cleanedRealTl!;
+      const e1 = moveClip(s0, clip1.id, 5.0);
+      const e2 = moveClip(e1, clip1.id, 10.0);
+      const e3 = moveClip(e2, clip1.id, 15.0);
+
+      const hist1 = new TimelineHistory({ initialTimeline: s0 });
+      hist1.push(e1);
+      hist1.push(e2);
+      hist1.push(e3);
+
+      assert.strictEqual(hist1.getHistoryLength(), 4, "Scenario 1: History contains all 3 rapid edits");
+      assert.strictEqual(hist1.getCurrentIndex(), 3, "Scenario 1: Current index is at edit 3");
+      assert.strictEqual(hist1.canUndo(), true, "Scenario 1: canUndo is true");
+      assert.strictEqual(hist1.canRedo(), false, "Scenario 1: canRedo is false");
+
+      let savesExecuted = 0;
+      const savedStates: Timeline[] = [];
+      const q1 = new TimelineSaveQueue({
+        saveFn: async (payload) => {
+          savesExecuted++;
+          savedStates.push(payload);
+          await new Promise((r) => setTimeout(r, 40));
+          return payload;
+        },
+        initialTimeline: s0
+      });
+
+      // Rapidly enqueue all 3 edits while saves are pending
+      q1.enqueue(e1);
+      q1.enqueue(e2);
+      q1.enqueue(e3);
+      await q1.waitForIdle();
+
+      assert(savesExecuted <= 2, `Scenario 1: Intermediate edits coalesced (${savesExecuted} saves run)`);
+      assert.strictEqual(
+        savedStates[savedStates.length - 1].tracks[0].clips[0].timelineStart,
+        15.0,
+        "Scenario 1: Final persisted state matches edit 3"
+      );
+      console.log("  ✓ Scenario 1: 3 rapid edits coalesce correctly into latest trailing save");
+      passed++;
+    }
+
+    // Scenario 2: User immediately presses Undo three times
+    {
+      const s0 = cleanedRealTl!;
+      const e1 = moveClip(s0, clip1.id, 5.0);
+      const e2 = moveClip(e1, clip1.id, 10.0);
+      const e3 = moveClip(e2, clip1.id, 15.0);
+
+      const hist2 = new TimelineHistory({ initialTimeline: s0 });
+      hist2.push(e1);
+      hist2.push(e2);
+      hist2.push(e3);
+
+      const savedStates: Timeline[] = [];
+      const q2 = new TimelineSaveQueue({
+        saveFn: async (payload) => {
+          savedStates.push(payload);
+          await new Promise((r) => setTimeout(r, 40));
+          return payload;
+        },
+        initialTimeline: e3
+      });
+
+      // Rapidly press undo 3 times
+      const u1 = hist2.undo()!;
+      q2.enqueue(u1);
+      const u2 = hist2.undo()!;
+      q2.enqueue(u2);
+      const u3 = hist2.undo()!;
+      q2.enqueue(u3);
+
+      assert.strictEqual(u3.tracks[0].clips[0].timelineStart, 0, "Scenario 2: 3rd undo returns s0");
+      assert.strictEqual(hist2.getCurrentIndex(), 0, "Scenario 2: History index is at 0");
+      assert.strictEqual(hist2.canUndo(), false, "Scenario 2: canUndo is false at base");
+      assert.strictEqual(hist2.canRedo(), true, "Scenario 2: canRedo is true (3 redo steps available)");
+      assert.strictEqual(hist2.getRedoCount(), 3, "Scenario 2: getRedoCount is 3");
+
+      await q2.waitForIdle();
+      assert.strictEqual(
+        savedStates[savedStates.length - 1].tracks[0].clips[0].timelineStart,
+        0,
+        "Scenario 2: Final persisted state matches base state s0"
+      );
+      console.log("  ✓ Scenario 2: Rapid 3x undo steps back accurately and persists baseline s0");
+      passed++;
+    }
+
+    // Scenario 3: User presses Redo while an Undo save is still pending
+    {
+      const s0 = cleanedRealTl!;
+      const e1 = moveClip(s0, clip1.id, 8.0);
+      const hist3 = new TimelineHistory({ initialTimeline: s0 });
+      hist3.push(e1);
+
+      // Undo to s0
+      const undone = hist3.undo()!;
+      const savedStates: Timeline[] = [];
+      const q3 = new TimelineSaveQueue({
+        saveFn: async (payload) => {
+          savedStates.push(payload);
+          await new Promise((r) => setTimeout(r, 40));
+          return payload;
+        },
+        initialTimeline: e1
+      });
+
+      // Enqueue undo save (s0)
+      q3.enqueue(undone);
+      assert.strictEqual(q3.isBusy(), true, "Scenario 3: Undo save is in flight");
+
+      // While undo save is in flight, user presses Redo
+      const redone = hist3.redo()!;
+      q3.enqueue(redone);
+
+      assert.strictEqual(hist3.getCurrentIndex(), 1, "Scenario 3: History index restored to 1");
+      assert.strictEqual(hist3.canUndo(), true, "Scenario 3: canUndo is true after redo");
+      assert.strictEqual(hist3.canRedo(), false, "Scenario 3: canRedo is false after redo");
+
+      await q3.waitForIdle();
+      assert.strictEqual(
+        savedStates[savedStates.length - 1].tracks[0].clips[0].timelineStart,
+        8.0,
+        "Scenario 3: Final persisted state matches redone edit e1"
+      );
+      console.log("  ✓ Scenario 3: Redo during pending undo serializes without out-of-order writes");
+      passed++;
+    }
+
+    // Scenario 4: User performs a new edit after Undo while a save is pending
+    {
+      const s0 = cleanedRealTl!;
+      const e1 = moveClip(s0, clip1.id, 6.0);
+      const hist4 = new TimelineHistory({ initialTimeline: s0 });
+      hist4.push(e1);
+
+      // Undo back to s0
+      const undone = hist4.undo()!;
+      const savedStates: Timeline[] = [];
+      const q4 = new TimelineSaveQueue({
+        saveFn: async (payload) => {
+          savedStates.push(payload);
+          await new Promise((r) => setTimeout(r, 40));
+          return payload;
+        },
+        initialTimeline: e1
+      });
+
+      q4.enqueue(undone);
+      assert.strictEqual(q4.isBusy(), true, "Scenario 4: Undo save in flight");
+
+      // While undo save is in flight, perform NEW edit e2 (start: 18.0)
+      const e2 = moveClip(s0, clip1.id, 18.0);
+      hist4.push(e2);
+      q4.enqueue(e2);
+
+      assert.strictEqual(hist4.canRedo(), false, "Scenario 4: Abandoned redo branch (e1) discarded");
+      assert.strictEqual(hist4.getHistoryLength(), 2, "Scenario 4: History contains [s0, e2]");
+      assert.strictEqual(hist4.getCurrent()?.tracks[0].clips[0].timelineStart, 18.0);
+
+      await q4.waitForIdle();
+      assert.strictEqual(
+        savedStates[savedStates.length - 1].tracks[0].clips[0].timelineStart,
+        18.0,
+        "Scenario 4: Final persisted state matches new edit e2"
+      );
+      console.log("  ✓ Scenario 4: New edit after undo discards abandoned redo and persists cleanly");
+      passed++;
+    }
+
+    // Scenario 5: The first in-flight save fails while newer undo/redo states are queued
+    {
+      const s0 = cleanedRealTl!;
+      const e1 = moveClip(s0, clip1.id, 7.0);
+
+      let e1Failed = false;
+      let e2Succeeded = false;
+      let rollbackReported: Timeline | null = null;
+
+      const q5 = new TimelineSaveQueue({
+        saveFn: async (payload) => {
+          await new Promise((r) => setTimeout(r, 30));
+          if (payload.tracks[0].clips[0].timelineStart === 7.0) {
+            e1Failed = true;
+            throw new Error("Simulated 500 error on edit 1");
+          }
+          e2Succeeded = true;
+          return payload;
+        },
+        onSaveError: (_err, rolledBack) => {
+          rollbackReported = rolledBack;
+        },
+        initialTimeline: s0
+      });
+
+      // Enqueue edit 1
+      q5.enqueue(e1);
+      // While edit 1 is failing, user presses undo back to s0
+      q5.enqueue(s0);
+
+      await q5.waitForIdle();
+
+      assert.strictEqual(e1Failed, true, "Scenario 5: First save failed as expected");
+      assert.strictEqual(e2Succeeded, true, "Scenario 5: Second queued save (undo to s0) proceeded and succeeded");
+      assert.strictEqual(rollbackReported, null, "Scenario 5: No erroneous rollback triggered since newer edit was queued");
+      assert.strictEqual(q5.getLastSavedTimeline()?.tracks[0].clips[0].timelineStart, 0);
+      console.log("  ✓ Scenario 5: First save failure does not prevent newer queued state from saving");
+      passed++;
+    }
+
+    // Scenario 6: The final coalesced save fails
+    {
+      const s0 = cleanedRealTl!;
+      const e1 = moveClip(s0, clip1.id, 5.0);
+      const e2 = moveClip(e1, clip1.id, 10.0);
+
+      const hist6 = new TimelineHistory({ initialTimeline: s0 });
+      hist6.push(e1);
+      hist6.push(e2);
+      assert.strictEqual(hist6.getCurrentIndex(), 2, "Scenario 6: Index is 2 before save failure");
+
+      let rollbackState: Timeline | null = null;
+      let errorReported: Error | null = null;
+
+      const q6 = new TimelineSaveQueue({
+        saveFn: async () => {
+          await new Promise((r) => setTimeout(r, 30));
+          throw new Error("Final coalesced save failed on server");
+        },
+        onSaveError: (err, rolledBack) => {
+          errorReported = err;
+          rollbackState = rolledBack;
+        },
+        initialTimeline: s0
+      });
+
+      q6.enqueue(e2);
+      await q6.waitForIdle();
+
+      assert(errorReported !== null, "Scenario 6: Error reported on final save failure");
+      assert(rollbackState !== null, "Scenario 6: Rollback target provided");
+      assert.strictEqual((rollbackState as Timeline | null)?.tracks[0].clips[0].timelineStart, 0, "Scenario 6: Rolled back to confirmed s0");
+
+      // Reconcile history
+      hist6.reconcile(rollbackState!);
+      assert.strictEqual(hist6.getCurrentIndex(), 0, "Scenario 6: History index reverted to s0 (0)");
+      assert.strictEqual(hist6.getCurrent()?.tracks[0].clips[0].timelineStart, 0, "Scenario 6: Current timeline is s0");
+      assert.strictEqual(hist6.canRedo(), false, "Scenario 6: No invalid redo branch left after rollback");
+      assert.strictEqual(hist6.getHistoryLength(), 1, "Scenario 6: Unconfirmed forward edits trimmed");
+      console.log("  ✓ Scenario 6: Final save failure rolls back cleanly without leaving invalid redo branches");
+      passed++;
+    }
+
+    // Scenario 7: The timeline is reloaded while history has pending operations
+    {
+      const s0 = cleanedRealTl!;
+      const e1 = moveClip(s0, clip1.id, 14.0);
+
+      let saveStarted = false;
+      let saveFinished = false;
+
+      const q7 = new TimelineSaveQueue({
+        saveFn: async (payload) => {
+          saveStarted = true;
+          await new Promise((r) => setTimeout(r, 60));
+          saveFinished = true;
+          return payload;
+        },
+        initialTimeline: s0
+      });
+
+      // User performs edit e1
+      q7.enqueue(e1);
+      assert.strictEqual(q7.isBusy(), true, "Scenario 7: Save is in flight");
+      assert.strictEqual(saveStarted, true, "Scenario 7: Save has started in background");
+
+      // Reload starts: calls waitForIdle() before reading
+      assert.strictEqual(saveFinished, false, "Scenario 7: Save has not finished yet");
+      await q7.waitForIdle();
+      assert.strictEqual(saveFinished, true, "Scenario 7: waitForIdle() ensured in-flight save settled");
+
+      // Now simulated fresh reload returns confirmed state
+      const reloadedData = q7.getLastSavedTimeline()!;
+      assert.strictEqual(reloadedData.tracks[0].clips[0].timelineStart, 14.0, "Scenario 7: Reload reads updated confirmed state");
+
+      const hist7 = new TimelineHistory({ initialTimeline: reloadedData });
+      assert.strictEqual(hist7.getCurrentIndex(), 0, "Scenario 7: Fresh history initialized at index 0");
+      assert.strictEqual(hist7.canUndo(), false, "Scenario 7: canUndo false on fresh reload");
+      assert.strictEqual(hist7.canRedo(), false, "Scenario 7: canRedo false on fresh reload");
+      console.log("  ✓ Scenario 7: Reload waits for pending operations and initializes clean durable state");
+      passed++;
+    }
   } catch (err) {
     console.error("  ✗ FAIL: Live Vite dev server / proxy test failed:", err);
     failed++;

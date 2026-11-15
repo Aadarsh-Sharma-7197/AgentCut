@@ -15,6 +15,9 @@ import {
   getClipTimelineEnd,
   getTimelineDuration,
   TimelineValidationError,
+  TimelineHistory,
+  cloneTimeline,
+  areTimelinesEquivalent,
   type Timeline,
   type MediaAsset
 } from "./index.js";
@@ -864,6 +867,167 @@ function runTimelineTests() {
   const validationOfDel = validateTimeline(afterDelTrack2Clip, { assets: [videoAsset] });
   assert(validationOfDel.valid, "Resulting timeline after deletions passes validateTimeline");
   assert(validationOfDel.errors.length === 0, "Zero validation errors on deleted timeline");
+
+  // ==========================================
+  // Test 17: Timeline History (Undo/Redo Stack)
+  // ==========================================
+  console.log("\n[Test 17] Timeline History (Undo/Redo Stack)");
+
+  const tlBase = createEmptyTimeline({
+    projectId: "proj_hist_1",
+    id: "tl_hist_1",
+    settings: { frameRate: 30, width: 1920, height: 1080 }
+  });
+  const tlWithTrack = addTrack(tlBase, {
+    id: "track_v1",
+    name: "Video 1",
+    type: "video"
+  });
+  const baseTl = addClip(tlWithTrack, {
+    id: "clip_hist_1",
+    assetId: "asset_video_1",
+    trackId: "track_v1",
+    sourceStart: 0,
+    sourceEnd: 30,
+    timelineStart: 0,
+    name: "Base Clip"
+  });
+
+  const history = new TimelineHistory({ maxHistory: 5, initialTimeline: baseTl });
+
+  // 1. Initial State
+  assert(!history.canUndo(), "Initial history has canUndo: false");
+  assert(!history.canRedo(), "Initial history has canRedo: false");
+  assert(history.getUndoCount() === 0, "Initial getUndoCount is 0");
+  assert(history.getRedoCount() === 0, "Initial getRedoCount is 0");
+  assert(history.getHistoryLength() === 1, "Initial history length is 1");
+  assert(history.getCurrent()?.tracks[0].clips[0].id === "clip_hist_1", "getCurrent returns baseline timeline");
+
+  // 2. Immutability of returned timeline
+  const currentSnapshot = history.getCurrent()!;
+  currentSnapshot.tracks[0].clips[0].timelineStart = 999;
+  assert(history.getCurrent()?.tracks[0].clips[0].timelineStart === 0, "Mutating returned timeline does not corrupt history snapshot");
+
+  // 3. Move edit push
+  const movedTl = moveClip(baseTl, "clip_hist_1", 15, undefined, { assets: [videoAsset] });
+  const pushResult1 = history.push(movedTl);
+  assert(pushResult1 === true, "Push moved timeline succeeds");
+  assert(history.canUndo(), "canUndo is true after move");
+  assert(!history.canRedo(), "canRedo is false at latest state");
+  assert(history.getUndoCount() === 1, "getUndoCount is 1 after move");
+  assert(history.getCurrent()?.tracks[0].clips[0].timelineStart === 15, "getCurrent reflects moved position");
+
+  // 4. Duplicate state suppression
+  const pushedDuplicate = history.push(movedTl);
+  assert(pushedDuplicate === false, "Duplicate timeline push is suppressed");
+  assert(history.getUndoCount() === 1, "Undo count unchanged after duplicate push");
+
+  // 5. Trim edit push
+  const trimmedTl = trimClip(movedTl, "clip_hist_1", "right", 35, { assets: [videoAsset] });
+  history.push(trimmedTl);
+  assert(history.getUndoCount() === 2, "Undo count is 2 after trim");
+  assert(history.getCurrent()?.tracks[0].clips[0].sourceEnd === 20, "getCurrent reflects trimmed sourceEnd");
+
+  // 6. Split edit push
+  const splitTl = splitClip(trimmedTl, "clip_hist_1", 25, { assets: [videoAsset] });
+  history.push(splitTl);
+  assert(history.getUndoCount() === 3, "Undo count is 3 after split");
+  assert(history.getCurrent()?.tracks[0].clips.length === 2, "getCurrent reflects 2 clips after split");
+
+  // 7. Delete edit push
+  const secondClipId = splitTl.tracks[0].clips[1].id;
+  const deletedTl = deleteClip(splitTl, secondClipId, { assets: [videoAsset] });
+  history.push(deletedTl);
+  assert(history.getUndoCount() === 4, "Undo count is 4 after delete");
+  assert(history.getCurrent()?.tracks[0].clips.length === 1, "getCurrent reflects 1 clip after delete");
+
+  // 8. Undo step-by-step
+  // Undo Delete -> restores 2 clips (split state)
+  const undoneDelete = history.undo();
+  assert(undoneDelete !== null, "undo() returns state");
+  assert(undoneDelete?.tracks[0].clips.length === 2, "Undo delete restores 2 clips");
+  assert(undoneDelete?.tracks[0].clips.some(c => c.id === secondClipId), "Undo delete restores the exact deleted clip ID");
+  assert(history.canUndo() && history.canRedo(), "canUndo and canRedo both true in mid-stack");
+  assert(history.getUndoCount() === 3 && history.getRedoCount() === 1, "Undo/Redo counts correct after 1st undo");
+
+  // Undo Split -> restores 1 single clip (pre-split trimmed state)
+  const undoneSplit = history.undo();
+  assert(undoneSplit?.tracks[0].clips.length === 1, "Undo split restores single clip");
+  assert(undoneSplit?.tracks[0].clips[0].id === "clip_hist_1", "Undo split restores original clip ID");
+  assert(undoneSplit?.tracks[0].clips[0].timelineStart === 15, "Pre-split start is 15");
+  assert(undoneSplit?.tracks[0].clips[0].sourceEnd === 20, "Pre-split sourceEnd is 20");
+
+  // Undo Trim -> restores pre-trimmed moved state
+  const undoneTrim = history.undo();
+  assert(undoneTrim?.tracks[0].clips[0].sourceEnd === 30, "Undo trim restores pre-trim sourceEnd (30)");
+  assert(undoneTrim?.tracks[0].clips[0].timelineStart === 15, "Pre-trim timelineStart preserved (15)");
+
+  // Undo Move -> restores initial base state
+  const undoneMove = history.undo();
+  assert(undoneMove?.tracks[0].clips[0].timelineStart === 0, "Undo move restores original timelineStart (0)");
+  assert(!history.canUndo(), "canUndo is false at bottom of stack");
+  assert(history.undo() === null, "undo() at bottom of stack returns null");
+
+  // 9. Redo step-by-step
+  const redoneMove = history.redo();
+  assert(redoneMove?.tracks[0].clips[0].timelineStart === 15, "Redo move restores timelineStart 15");
+  const redoneTrim = history.redo();
+  assert(redoneTrim?.tracks[0].clips[0].sourceEnd === 20, "Redo trim restores trimmed sourceEnd 20");
+  const redoneSplit = history.redo();
+  assert(redoneSplit?.tracks[0].clips.length === 2, "Redo split restores 2 clips");
+  const redoneDelete = history.redo();
+  assert(redoneDelete?.tracks[0].clips.length === 1, "Redo delete re-applies deletion");
+  assert(!history.canRedo(), "canRedo is false at top of stack");
+  assert(history.redo() === null, "redo() at top of stack returns null");
+
+  // 10. Redo branch invalidation
+  // Step back 2 times to split state
+  history.undo(); // back to split
+  history.undo(); // back to trim
+  assert(history.canRedo(), "canRedo is true before branch invalidation");
+  // Now make a different edit: move the trimmed clip to timelineStart: 50
+  const branchTl = moveClip(history.getCurrent()!, "clip_hist_1", 50, undefined, { assets: [videoAsset] });
+  history.push(branchTl);
+  assert(!history.canRedo(), "Redo branch is invalidated after new edit");
+  assert(history.getRedoCount() === 0, "Redo count is 0 after new edit");
+  assert(history.getCurrent()?.tracks[0].clips[0].timelineStart === 50, "Current state is the new branch");
+
+  // 11. History Limit (Max History sliding window)
+  const smallHistory = new TimelineHistory({ maxHistory: 3, initialTimeline: baseTl });
+  assert(smallHistory.getHistoryLength() === 1, "smallHistory starts at 1");
+  const edit1 = moveClip(baseTl, "clip_hist_1", 10, undefined, { assets: [videoAsset] });
+  const edit2 = moveClip(edit1, "clip_hist_1", 20, undefined, { assets: [videoAsset] });
+  const edit3 = moveClip(edit2, "clip_hist_1", 30, undefined, { assets: [videoAsset] });
+  smallHistory.push(edit1);
+  smallHistory.push(edit2);
+  smallHistory.push(edit3); // 4th total state pushed with maxHistory: 3
+  assert(smallHistory.getHistoryLength() === 3, "History length capped at maxHistory (3)");
+  // Oldest state (timelineStart 0) was dropped by sliding window; undoing twice should reach edit1 (timelineStart 10)
+  smallHistory.undo(); // back to edit2 (20)
+  const oldestAvailable = smallHistory.undo(); // back to edit1 (10)
+  assert(oldestAvailable?.tracks[0].clips[0].timelineStart === 10, "Oldest available state is edit1 (sliding window)");
+  assert(!smallHistory.canUndo(), "Cannot undo beyond maxHistory sliding window limit");
+
+  // 12. Reconcile on Persistence Failure
+  const reconHistory = new TimelineHistory({ maxHistory: 10, initialTimeline: baseTl });
+  const reconEdit1 = moveClip(baseTl, "clip_hist_1", 10, undefined, { assets: [videoAsset] });
+  const reconEdit2 = moveClip(reconEdit1, "clip_hist_1", 20, undefined, { assets: [videoAsset] });
+  reconHistory.push(reconEdit1);
+  reconHistory.push(reconEdit2);
+  assert(reconHistory.getCurrentIndex() === 2, "Current index is 2 before failure");
+
+  // Simulate server reject rollback to reconEdit1
+  reconHistory.reconcile(reconEdit1);
+  assert(reconHistory.getCurrentIndex() === 1, "Reconcile sets history index back to confirmed server state index");
+  assert(reconHistory.getCurrent()?.tracks[0].clips[0].timelineStart === 10, "Current timeline matches reconciled state");
+  assert(!reconHistory.canRedo(), "Reconcile truncates unconfirmed forward edits and leaves no invalid redo branch");
+  assert(reconHistory.canUndo(), "Reconcile preserves valid confirmed prior history");
+
+  // Reconcile with unrecorded server state re-initializes stack safely
+  reconHistory.reconcile(baseTl);
+  assert(reconHistory.getCurrent()?.tracks[0].clips[0].timelineStart === 0, "Reconcile with baseline resets to baseline");
+  assert(reconHistory.getCurrentIndex() === 0, "Reconcile resets index to 0");
+
 
   console.log(`\n=== Timeline Test Results: ${passed} passed, ${failed} failed ===`);
   if (failed > 0) {

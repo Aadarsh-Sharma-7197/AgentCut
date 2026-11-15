@@ -9,6 +9,10 @@ interface TimelineToolbarProps {
   zoom: number;
   saveStatus?: SaveStatus;
   saveError?: string | null;
+  canUndo?: boolean;
+  canRedo?: boolean;
+  onUndo?: () => void;
+  onRedo?: () => void;
   canSplit?: boolean;
   onSplit?: () => void;
   canDelete?: boolean;
@@ -23,6 +27,10 @@ export const TimelineToolbar: React.FC<TimelineToolbarProps> = ({
   zoom,
   saveStatus = "idle",
   saveError,
+  canUndo = false,
+  canRedo = false,
+  onUndo,
+  onRedo,
   canSplit = false,
   onSplit,
   canDelete = false,
@@ -68,6 +76,30 @@ export const TimelineToolbar: React.FC<TimelineToolbarProps> = ({
           <span className="playhead-time-label">Time</span>
           <span>{formatTimeCode(currentTime)}</span>
         </div>
+        <button
+          className="undo-btn"
+          onClick={onUndo}
+          disabled={!canUndo}
+          title={
+            canUndo
+              ? "Undo last edit (Shortcut: Ctrl+Z / Cmd+Z)"
+              : "Nothing to undo"
+          }
+        >
+          ↺ Undo
+        </button>
+        <button
+          className="redo-btn"
+          onClick={onRedo}
+          disabled={!canRedo}
+          title={
+            canRedo
+              ? "Redo last undone edit (Shortcut: Ctrl+Shift+Z / Ctrl+Y)"
+              : "Nothing to redo"
+          }
+        >
+          ↻ Redo
+        </button>
         <button
           className="split-btn"
           onClick={onSplit}

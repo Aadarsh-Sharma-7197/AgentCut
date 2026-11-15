@@ -50,6 +50,22 @@ export class TimelineSaveQueue {
   }
 
   /**
+   * Waits for all in-flight and pending save operations to settle.
+   */
+  public async waitForIdle(): Promise<void> {
+    while (this.isBusy()) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
+  /**
+   * Alias for waitForIdle().
+   */
+  public async drain(): Promise<void> {
+    return this.waitForIdle();
+  }
+
+  /**
    * Enqueues a timeline state for persistence.
    * If a save is already running, the pending payload is updated to the latest state.
    */
