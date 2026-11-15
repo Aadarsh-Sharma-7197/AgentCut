@@ -171,3 +171,36 @@ export function formatClipDuration(seconds: number): string {
   return `${seconds.toFixed(1)}s`;
 }
 
+/**
+ * Calculates new timelineStart position during horizontal clip dragging.
+ * Converts horizontal pixel delta to seconds, adds to initial start, rounds to 2 decimals,
+ * and strictly prevents negative positions.
+ */
+export function calculateDraggedTimelineStart(
+  initialTimelineStart: number,
+  deltaPixels: number,
+  pps: number
+): number {
+  if (typeof initialTimelineStart !== "number" || !Number.isFinite(initialTimelineStart)) {
+    return 0;
+  }
+  if (typeof deltaPixels !== "number" || !Number.isFinite(deltaPixels) || pps <= 0) {
+    return Math.max(0, initialTimelineStart);
+  }
+
+  const deltaSeconds = deltaPixels / pps;
+  const candidate = initialTimelineStart + deltaSeconds;
+  return Math.max(0, Math.round(candidate * 100) / 100);
+}
+
+/**
+ * Checks if a destination track type is compatible with a clip based on its source track type.
+ * Video clips must stay on video tracks, audio on audio, caption on caption.
+ */
+export function isTrackTypeCompatible(
+  sourceType: string,
+  destinationType: string
+): boolean {
+  return sourceType === destinationType;
+}
+

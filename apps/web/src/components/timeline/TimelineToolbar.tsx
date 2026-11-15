@@ -1,10 +1,14 @@
 import React from "react";
 import { formatTimeCode, MIN_ZOOM, MAX_ZOOM, ZOOM_STEP } from "../../utils/timelineCalculations";
 
+export type SaveStatus = "idle" | "saving" | "saved" | "error";
+
 interface TimelineToolbarProps {
   frameRate: number;
   currentTime: number;
   zoom: number;
+  saveStatus?: SaveStatus;
+  saveError?: string | null;
   onZoomChange: (newZoom: number) => void;
   onResetZoom: () => void;
 }
@@ -13,6 +17,8 @@ export const TimelineToolbar: React.FC<TimelineToolbarProps> = ({
   frameRate,
   currentTime,
   zoom,
+  saveStatus = "idle",
+  saveError,
   onZoomChange,
   onResetZoom
 }) => {
@@ -33,6 +39,20 @@ export const TimelineToolbar: React.FC<TimelineToolbarProps> = ({
           <span>Timeline</span>
         </h3>
         <span className="timeline-badge">{frameRate} fps</span>
+        {saveStatus === "saving" && (
+          <span className="save-status save-status-saving">
+            <span className="spinner" style={{ width: "10px", height: "10px", borderWidth: "2px", display: "inline-block" }}></span>
+            Saving...
+          </span>
+        )}
+        {saveStatus === "saved" && (
+          <span className="save-status save-status-saved">✓ Saved</span>
+        )}
+        {saveStatus === "error" && (
+          <span className="save-status save-status-error" title={saveError || "Failed to save"}>
+            ⚠️ Save Failed
+          </span>
+        )}
       </div>
 
       <div className="timeline-toolbar-center">

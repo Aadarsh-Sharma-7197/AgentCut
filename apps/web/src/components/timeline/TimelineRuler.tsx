@@ -6,18 +6,21 @@ interface TimelineRulerProps {
   pps: number;
   timelineWidth: number;
   onSeek: (seconds: number) => void;
+  onDeselect?: () => void;
 }
 
 export const TimelineRuler: React.FC<TimelineRulerProps> = ({
   timelineDuration,
   pps,
   timelineWidth,
-  onSeek
+  onSeek,
+  onDeselect
 }) => {
   const totalSeconds = Math.max(30, timelineDuration + 10);
   const ticks = useMemo(() => getRulerTicks(totalSeconds, pps), [totalSeconds, pps]);
 
   const handleRulerClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    onDeselect?.();
     const rect = e.currentTarget.getBoundingClientRect();
     const clickX = e.clientX - rect.left;
     const seekTime = pixelsToTime(clickX, pps);

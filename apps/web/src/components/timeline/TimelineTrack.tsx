@@ -1,5 +1,5 @@
 import React from "react";
-import type { Track } from "@agentcut/shared";
+import type { Track, Clip } from "@agentcut/shared";
 import { TimelineClip } from "./TimelineClip";
 import { pixelsToTime } from "../../utils/timelineCalculations";
 
@@ -8,7 +8,15 @@ interface TimelineTrackProps {
   pps: number;
   timelineWidth: number;
   assetNames: Record<string, string>;
+  selectedClipId: string | null;
+  draggedClipId: string | null;
+  draggedTimelineStart?: number;
+  isCurrentDropTarget: boolean;
+  isDropCompatible: boolean;
   onSeek: (seconds: number) => void;
+  onSelectClip: (clipId: string) => void;
+  onDeselect: () => void;
+  onClipDragStart: (clip: Clip, e: React.PointerEvent<HTMLDivElement>) => void;
 }
 
 export const TimelineTrack: React.FC<TimelineTrackProps> = ({
@@ -16,7 +24,15 @@ export const TimelineTrack: React.FC<TimelineTrackProps> = ({
   pps,
   timelineWidth,
   assetNames,
-  onSeek
+  selectedClipId,
+  draggedClipId,
+  draggedTimelineStart,
+  isCurrentDropTarget,
+  isDropCompatible,
+  onSeek,
+  onSelectClip,
+  onDeselect,
+  onClipDragStart
 }) => {
   const getTrackIcon = (type: string) => {
     switch (type) {
@@ -32,14 +48,25 @@ export const TimelineTrack: React.FC<TimelineTrackProps> = ({
   };
 
   const handleLaneClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    onDeselect();
     const rect = e.currentTarget.getBoundingClientRect();
     const clickX = e.clientX - rect.left;
     const seekTime = pixelsToTime(clickX, pps);
     onSeek(seekTime);
   };
 
+  const dropTargetClass = isCurrentDropTarget
+    ? isDropCompatible
+      ? "track-lane-drop-target"
+      : "track-lane-drop-incompatible"
+    : "";
+
   return (
-    <div className="timeline-track-row">
+    <div
+      className="timeline-track-row"
+      data-track-id={track.id}
+      data-track-type={track.type}
+    >
       <div className={`timeline-track-header track-header-${track.type}`}>
         <div className="track-header-main">
           <div className="track-name-group">
@@ -57,22 +84,33 @@ export const TimelineTrack: React.FC<TimelineTrackProps> = ({
       </div>
 
       <div
-        className="timeline-track-lane"
+        className={`timeline-track-lane ${dropTargetClass}`}
+        data-track-id={track.id}
+        data-track-type={track.type}
         style={{ width: `${timelineWidth}px` }}
         onClick={handleLaneClick}
       >
         {track.clips.length === 0 ? (
           <div className="timeline-track-lane-empty">Empty track</div>
         ) : (
-          track.clips.map((clip) => (
-            <TimelineClip
-              key={clip.id}
-              clip={clip}
-              trackType={track.type}
-              pps={pps}
-              assetName={assetNames[clip.assetId]}
-            />
-          ))
+          track.clips.map((clip) => {
+            const isDragging = draggedClipId === clip.id;
+            return (
+              <TimelineClip
+                key={clip.id}
+                clip={clip}
+                trackType={track.type}
+                pps={pps}
+                assetName={assetNames[clip.assetId]}
+                isSelected={selectedClipId === clip.id}
+                isDragging={isDragging}
+                isTargetCompatible={isDragging ? isDropCompatible : true}
+                dragTimelineStart={isDragging ? draggedTimelineStart : undefined}
+                onSelect={onSelectClip}
+                onDragStart={onClipDragStart}
+              />
+            );
+          })
         )}
       </div>
     </div>

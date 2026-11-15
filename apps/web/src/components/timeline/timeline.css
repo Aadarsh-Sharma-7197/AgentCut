@@ -343,14 +343,174 @@
   flex-direction: column;
   justify-content: space-between;
   overflow: hidden;
-  cursor: default;
-  transition: filter 0.15s ease, border-color 0.15s ease;
+  cursor: grab;
+  touch-action: none;
+  transition: filter 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
   user-select: none;
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
 }
 
 .timeline-clip:hover {
   filter: brightness(1.15);
+}
+
+.timeline-clip:active {
+  cursor: grabbing;
+}
+
+/* Selected Clip State */
+.timeline-clip.timeline-clip-selected {
+  outline: 2px solid #38bdf8;
+  border-color: #38bdf8 !important;
+  box-shadow: 0 0 0 2px #38bdf8, 0 0 16px rgba(56, 189, 248, 0.5);
+  z-index: 15;
+}
+
+/* Dragging Clip State */
+.timeline-clip.timeline-clip-dragging {
+  cursor: grabbing !important;
+  opacity: 0.92;
+  z-index: 25;
+  box-shadow: 0 8px 25px rgba(0, 0, 0, 0.7), 0 0 0 2px #38bdf8;
+  transform: translateZ(0);
+}
+
+/* Incompatible Track Drop State */
+.timeline-clip.timeline-clip-incompatible {
+  outline: 2px solid #ef4444 !important;
+  border-color: #ef4444 !important;
+  box-shadow: 0 0 0 2px #ef4444, 0 0 16px rgba(239, 68, 68, 0.6) !important;
+  cursor: not-allowed !important;
+}
+
+/* Track Lane Drop Targets */
+.timeline-track-lane.track-lane-drop-target {
+  background-color: rgba(56, 189, 248, 0.08) !important;
+  box-shadow: inset 0 0 0 2px rgba(56, 189, 248, 0.6) !important;
+}
+
+.timeline-track-lane.track-lane-drop-incompatible {
+  background-color: rgba(239, 68, 68, 0.12) !important;
+  box-shadow: inset 0 0 0 2px rgba(239, 68, 68, 0.8) !important;
+}
+
+/* Selected Clip Info Inspector */
+.selected-clip-inspector {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.4rem 1.25rem;
+  background-color: #0c1524;
+  border-bottom: 1px solid var(--border-color);
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  animation: fadeIn 0.15s ease;
+}
+
+.selected-clip-left {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  overflow: hidden;
+}
+
+.selected-clip-tag {
+  background-color: rgba(56, 189, 248, 0.15);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  font-weight: 700;
+  text-transform: uppercase;
+  font-size: 0.65rem;
+  letter-spacing: 0.05em;
+}
+
+.selected-clip-name {
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.selected-clip-details {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.selected-clip-metric {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.metric-label {
+  color: var(--text-muted);
+}
+
+.metric-val {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.deselect-btn {
+  background: none;
+  border: 1px solid var(--border-color);
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  padding: 0.2rem 0.5rem;
+  font-size: 0.7rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.deselect-btn:hover {
+  background-color: var(--border-color);
+  color: var(--text-primary);
+}
+
+/* Save Status Indicator */
+.save-status {
+  font-size: 0.75rem;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: var(--radius-sm);
+}
+
+.save-status-saving {
+  color: #38bdf8;
+  background-color: rgba(56, 189, 248, 0.1);
+}
+
+.save-status-saved {
+  color: #10b981;
+  background-color: rgba(16, 185, 129, 0.1);
+}
+
+.save-status-error {
+  color: #ef4444;
+  background-color: rgba(239, 68, 68, 0.15);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+/* Incompatible Track Drop Warning Notice */
+.timeline-notice-banner {
+  padding: 0.4rem 1rem;
+  background-color: rgba(239, 68, 68, 0.15);
+  border-bottom: 1px solid rgba(239, 68, 68, 0.3);
+  color: #fca5a5;
+  font-size: 0.75rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 
 /* Clip Type Themes */
