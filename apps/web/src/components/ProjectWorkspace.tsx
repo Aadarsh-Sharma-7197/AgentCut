@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import type { Project, MediaAsset } from "@agentcut/shared";
 import { fetchMediaAssets, uploadMediaAsset, getMediaStreamUrl } from "../api/media";
+import { TimelineEditor } from "./timeline/TimelineEditor";
 
 interface ProjectWorkspaceProps {
   project: Project;
@@ -202,6 +203,9 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
           </div>
         </div>
       )}
+
+      {/* Visual Timeline Section */}
+      <TimelineEditor projectId={project.id} mediaAssets={mediaList} />
 
       {/* Media Library Section */}
       <section className="media-section">
