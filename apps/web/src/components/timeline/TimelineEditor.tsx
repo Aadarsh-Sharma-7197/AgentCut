@@ -20,6 +20,7 @@ import {
   formatClipDuration,
   DEFAULT_ZOOM
 } from "../../utils/timelineCalculations";
+import { TimelinePreview } from "./TimelinePreview";
 import { TimelineToolbar, type SaveStatus } from "./TimelineToolbar";
 import { TimelineRuler } from "./TimelineRuler";
 import { TimelineTrack } from "./TimelineTrack";
@@ -29,6 +30,7 @@ import "./timeline.css";
 interface TimelineEditorProps {
   projectId: string;
   mediaAssets: MediaAsset[];
+  selectedAssetId?: string;
 }
 
 interface DragState {
@@ -55,13 +57,19 @@ interface TrimState {
 
 export const TimelineEditor: React.FC<TimelineEditorProps> = ({
   projectId,
-  mediaAssets
+  mediaAssets,
+  selectedAssetId
 }) => {
   const [timeline, setTimeline] = useState<Timeline | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [zoom, setZoom] = useState<number>(DEFAULT_ZOOM);
   const [currentTime, setCurrentTime] = useState<number>(0);
+  const [isPlaying, setIsPlaying] = useState<boolean>(false);
+
+  const handleTogglePlay = useCallback(() => {
+    setIsPlaying((prev) => !prev);
+  }, []);
 
   // Selection state (frontend-only, non-persisted)
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
@@ -153,11 +161,27 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
     return null;
   }, [selectedClipId, timeline, trimState]);
 
-  const handleSeek = (seconds: number) => {
-    const maxBound = Math.max(30, timelineDuration + 10);
-    const clampedTime = Math.max(0, Math.min(seconds, maxBound));
-    setCurrentTime(clampedTime);
-  };
+  const handleSeek = useCallback(
+    (seconds: number) => {
+      const maxBound = Math.max(30, timelineDuration + 10);
+      const clampedTime = Math.max(0, Math.min(seconds, maxBound));
+      setCurrentTime(clampedTime);
+    },
+    [timelineDuration]
+  );
+
+  // When selectedAssetId is passed from Media Library, seek playhead to its clip on timeline
+  useEffect(() => {
+    if (!selectedAssetId || !timeline) return;
+    for (const track of timeline.tracks) {
+      const match = track.clips.find((c) => c.assetId === selectedAssetId);
+      if (match) {
+        handleSeek(match.timelineStart);
+        setSelectedClipId(match.id);
+        break;
+      }
+    }
+  }, [selectedAssetId, timeline, handleSeek]);
 
   const handleResetZoom = () => {
     setZoom(DEFAULT_ZOOM);
@@ -220,6 +244,7 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
   );
 
   const handleUndo = useCallback(() => {
+    setIsPlaying(false);
     if (!historyRef.current.canUndo()) return;
     const prev = historyRef.current.undo();
     if (prev) {
@@ -235,6 +260,7 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
   }, [persistTimeline, updateHistoryFlags]);
 
   const handleRedo = useCallback(() => {
+    setIsPlaying(false);
     if (!historyRef.current.canRedo()) return;
     const next = historyRef.current.redo();
     if (next) {
@@ -260,6 +286,7 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
 
   const handleSplitClip = useCallback(() => {
     if (!timeline || !selectedClipId || !canSplit) return;
+    setIsPlaying(false);
     try {
       const result = splitClipWithResult(timeline, selectedClipId, currentTime, {
         assets: mediaAssets
@@ -284,6 +311,7 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
 
   const handleDeleteSelectedClip = useCallback(() => {
     if (!timeline || !selectedClipId) return;
+    setIsPlaying(false);
     try {
       const updated = deleteClip(timeline, selectedClipId, { assets: mediaAssets });
       // 1. Push to history & update undo/redo flags
@@ -302,6 +330,7 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
   }, [timeline, selectedClipId, mediaAssets, persistTimeline, updateHistoryFlags]);
 
   // Keyboard shortcuts:
+  // - Space to play/pause
   // - Ctrl+Z / Cmd+Z to undo
   // - Ctrl+Shift+Z / Cmd+Shift+Z or Ctrl+Y / Cmd+Y to redo
   // - 'S' to split
@@ -315,6 +344,13 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
           target.tagName === "TEXTAREA" ||
           target.isContentEditable)
       ) {
+        return;
+      }
+
+      // Spacebar: toggle playback
+      if (e.key === " " || e.code === "Space") {
+        e.preventDefault();
+        handleTogglePlay();
         return;
       }
 
@@ -363,7 +399,8 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
     selectedClipId,
     handleDeleteSelectedClip,
     handleUndo,
-    handleRedo
+    handleRedo,
+    handleTogglePlay
   ]);
 
   // Trimming interaction handlers
@@ -534,6 +571,7 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
         }
 
         if (didChange) {
+          setIsPlaying(false);
           try {
             const updated = trimClip(
               timeline,
@@ -572,6 +610,7 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
         const trackChanged = dragState.targetTrackId !== dragState.sourceTrack.id;
 
         if (startChanged || trackChanged) {
+          setIsPlaying(false);
           try {
             // Apply move using shared timeline moveClip operation
             const updated = moveClip(
@@ -658,24 +697,40 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
   const frameRate = timeline.settings?.frameRate || 30;
 
   return (
-    <div className="timeline-editor-wrapper">
-      <TimelineToolbar
-        frameRate={frameRate}
+    <div className="timeline-section-container">
+      {/* Synchronized Timeline Video Preview Player */}
+      <TimelinePreview
+        projectId={projectId}
+        timeline={timeline}
         currentTime={currentTime}
-        zoom={zoom}
-        saveStatus={saveStatus}
-        saveError={saveError}
-        canUndo={canUndo}
-        canRedo={canRedo}
-        onUndo={handleUndo}
-        onRedo={handleRedo}
-        canSplit={canSplit}
-        onSplit={handleSplitClip}
-        canDelete={Boolean(selectedClipId)}
-        onDelete={handleDeleteSelectedClip}
-        onZoomChange={setZoom}
-        onResetZoom={handleResetZoom}
+        totalDuration={timelineDuration}
+        isPlaying={isPlaying}
+        onTogglePlay={handleTogglePlay}
+        onSeek={handleSeek}
+        mediaAssets={mediaAssets}
+        frameRate={frameRate}
       />
+
+      <div className="timeline-editor-wrapper">
+        <TimelineToolbar
+          frameRate={frameRate}
+          currentTime={currentTime}
+          zoom={zoom}
+          isPlaying={isPlaying}
+          onTogglePlay={handleTogglePlay}
+          saveStatus={saveStatus}
+          saveError={saveError}
+          canUndo={canUndo}
+          canRedo={canRedo}
+          onUndo={handleUndo}
+          onRedo={handleRedo}
+          canSplit={canSplit}
+          onSplit={handleSplitClip}
+          canDelete={Boolean(selectedClipId)}
+          onDelete={handleDeleteSelectedClip}
+          onZoomChange={setZoom}
+          onResetZoom={handleResetZoom}
+        />
 
       {/* Selected Clip Info Inspector */}
       {selectedClipInfo && (
@@ -813,5 +868,6 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
         </div>
       </div>
     </div>
-  );
+  </div>
+);
 };

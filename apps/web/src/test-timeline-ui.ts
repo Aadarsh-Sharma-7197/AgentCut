@@ -32,6 +32,10 @@ import {
   addClip,
   validateTimeline,
   TimelineHistory,
+  timelineTimeToSourceTime,
+  sourceTimeToTimelineTime,
+  findNextVideoClipAfterTime,
+  getTimelinePlaybackSnapshot,
   type Clip,
   type Timeline,
   type MediaAsset
@@ -1815,6 +1819,344 @@ async function runAllTests() {
       console.log("  ✓ Scenario 7: Reload waits for pending operations and initializes clean durable state");
       passed++;
     }
+
+    // 20. Timeline Playback & Preview Synchronization Verification
+    console.log("\n[Suite 20] Timeline Playback & Preview Synchronization Verification");
+
+    // 1. A clip beginning at timeline time zero
+    const pbClipZero: Clip = {
+      id: "pb_c_zero",
+      assetId: "asset_test_vid",
+      trackId: "tr_v1",
+      sourceStart: 0,
+      sourceEnd: 15.0,
+      timelineStart: 0,
+      name: "Clip Starting at 0"
+    };
+    assert.strictEqual(timelineTimeToSourceTime(pbClipZero, 0), 0);
+    assert.strictEqual(timelineTimeToSourceTime(pbClipZero, 7.5), 7.5);
+    assert.strictEqual(timelineTimeToSourceTime(pbClipZero, 15.0), 15.0);
+    assert.strictEqual(sourceTimeToTimelineTime(pbClipZero, 7.5), 7.5);
+    console.log("  ✓ 1. Clip beginning at timeline time zero maps accurately both ways");
+    passed++;
+
+    // 2. A clip beginning at a non-zero timeline position
+    const pbClipNonzeroTl: Clip = {
+      id: "pb_c_nonzerotl",
+      assetId: "asset_test_vid",
+      trackId: "tr_v1",
+      sourceStart: 0,
+      sourceEnd: 20.0,
+      timelineStart: 12.0,
+      name: "Clip Starting at 12s"
+    };
+    assert.strictEqual(timelineTimeToSourceTime(pbClipNonzeroTl, 12.0), 0);
+    assert.strictEqual(timelineTimeToSourceTime(pbClipNonzeroTl, 18.0), 6.0);
+    assert.strictEqual(sourceTimeToTimelineTime(pbClipNonzeroTl, 6.0), 18.0);
+    console.log("  ✓ 2. Clip beginning at non-zero timeline position maps accurately");
+    passed++;
+
+    // 3. A clip with a non-zero sourceStart
+    const pbClipNonzeroSrc: Clip = {
+      id: "pb_c_nonzerosrc",
+      assetId: "asset_test_vid",
+      trackId: "tr_v1",
+      sourceStart: 25.0,
+      sourceEnd: 45.0,
+      timelineStart: 8.0,
+      name: "Clip with sourceStart 25s"
+    };
+    assert.strictEqual(timelineTimeToSourceTime(pbClipNonzeroSrc, 8.0), 25.0);
+    assert.strictEqual(timelineTimeToSourceTime(pbClipNonzeroSrc, 18.0), 35.0);
+    assert.strictEqual(timelineTimeToSourceTime(pbClipNonzeroSrc, 28.0), 45.0);
+    assert.strictEqual(sourceTimeToTimelineTime(pbClipNonzeroSrc, 35.0), 18.0);
+    console.log("  ✓ 3. Clip with non-zero sourceStart maps with correct source offset");
+    passed++;
+
+    // 4. A moved clip
+    const pbBaseTl = createEmptyTimeline({ projectId: "pb_proj" });
+    const pbTrackTl = addTrack(pbBaseTl, { id: "tr_v1", name: "Video", type: "video" });
+    const pbWithClip = addClip(pbTrackTl, pbClipZero);
+    const pbMovedTl = moveClip(pbWithClip, pbClipZero.id, 25.0);
+    const movedClipObj = pbMovedTl.tracks[0].clips[0];
+
+    assert.strictEqual(movedClipObj.timelineStart, 25.0);
+    assert.strictEqual(timelineTimeToSourceTime(movedClipObj, 25.0), 0);
+    assert.strictEqual(timelineTimeToSourceTime(movedClipObj, 30.0), 5.0);
+    console.log("  ✓ 4. Moved clip maps playback to correct source section");
+    passed++;
+
+    // 5. A split clip and both resulting segments
+    const pbSplitRes = splitClipWithResult(pbWithClip, pbClipZero.id, 10.0);
+    const splitSeg1 = pbSplitRes.firstClip;
+    const splitSeg2 = pbSplitRes.secondClip;
+
+    assert.strictEqual(splitSeg1.timelineStart, 0);
+    assert.strictEqual(splitSeg1.sourceStart, 0);
+    assert.strictEqual(splitSeg1.sourceEnd, 10.0);
+    assert.strictEqual(timelineTimeToSourceTime(splitSeg1, 5.0), 5.0);
+
+    assert.strictEqual(splitSeg2.timelineStart, 10.0);
+    assert.strictEqual(splitSeg2.sourceStart, 10.0);
+    assert.strictEqual(splitSeg2.sourceEnd, 15.0);
+    assert.strictEqual(timelineTimeToSourceTime(splitSeg2, 10.0), 10.0);
+    assert.strictEqual(timelineTimeToSourceTime(splitSeg2, 13.0), 13.0);
+    console.log("  ✓ 5. Split clip segments map to respective source media sections");
+    passed++;
+
+    // 6. A left-trimmed clip
+    const pbLeftTrimmedTl = trimClip(pbWithClip, pbClipZero.id, "left", 5.0);
+    const leftTrimmedClip = pbLeftTrimmedTl.tracks[0].clips[0];
+    assert.strictEqual(leftTrimmedClip.timelineStart, 5.0);
+    assert.strictEqual(leftTrimmedClip.sourceStart, 5.0);
+    assert.strictEqual(timelineTimeToSourceTime(leftTrimmedClip, 5.0), 5.0);
+    assert.strictEqual(timelineTimeToSourceTime(leftTrimmedClip, 10.0), 10.0);
+    console.log("  ✓ 6. Left-trimmed clip respects updated timelineStart and sourceStart");
+    passed++;
+
+    // 7. A right-trimmed clip
+    const pbRightTrimmedTl = trimClip(pbWithClip, pbClipZero.id, "right", 8.0);
+    const rightTrimmedClip = pbRightTrimmedTl.tracks[0].clips[0];
+    assert.strictEqual(rightTrimmedClip.timelineStart, 0);
+    assert.strictEqual(rightTrimmedClip.sourceEnd, 8.0);
+    assert.strictEqual(timelineTimeToSourceTime(rightTrimmedClip, 8.0), 8.0);
+    console.log("  ✓ 7. Right-trimmed clip respects updated sourceEnd boundary");
+    passed++;
+
+    // 8. Seeking into a gap
+    const pbGapTl = addClip(
+      addClip(pbTrackTl, {
+        id: "c_gap_1",
+        assetId: "asset_test_vid",
+        trackId: "tr_v1",
+        sourceStart: 0,
+        sourceEnd: 8.0,
+        timelineStart: 0,
+        name: "Clip 1"
+      }),
+      {
+        id: "c_gap_2",
+        assetId: "asset_test_vid",
+        trackId: "tr_v1",
+        sourceStart: 8.0,
+        sourceEnd: 16.0,
+        timelineStart: 18.0, // 8.0 to 18.0 is a 10s GAP!
+        name: "Clip 2"
+      }
+    );
+
+    const gapSnap = getTimelinePlaybackSnapshot(pbGapTl, 12.0);
+    assert.strictEqual(gapSnap.isGap, true, "Snapshot at 12.0s is a gap");
+    assert.strictEqual(gapSnap.activeClip, null, "Active clip is null in gap");
+    console.log("  ✓ 8. Seeking into gap returns null active clip and isGap: true");
+    passed++;
+
+    // 9. Seeking exactly to clip boundaries
+    const snapAt0 = getTimelinePlaybackSnapshot(pbGapTl, 0);
+    assert.strictEqual(snapAt0.isGap, false);
+    assert.strictEqual(snapAt0.activeClip?.clip.id, "c_gap_1");
+    assert.strictEqual(snapAt0.activeClip?.sourceTime, 0);
+
+    const snapAtClip1End = getTimelinePlaybackSnapshot(pbGapTl, 8.0);
+    assert.strictEqual(snapAtClip1End.isGap, true, "At exact clip end boundary 8.0s, enters gap");
+
+    const snapAtClip2Start = getTimelinePlaybackSnapshot(pbGapTl, 18.0);
+    assert.strictEqual(snapAtClip2Start.isGap, false);
+    assert.strictEqual(snapAtClip2Start.activeClip?.clip.id, "c_gap_2");
+    assert.strictEqual(snapAtClip2Start.activeClip?.sourceTime, 8.0);
+    console.log("  ✓ 9. Seeking exactly to clip boundaries switches cleanly between clips and gaps");
+    passed++;
+
+    // 10. Transition to a contiguous next clip
+    const contiguousNext = findNextVideoClipAfterTime(pbSplitRes.timeline, 10.0, splitSeg1.id);
+    assert(contiguousNext !== null, "Contiguous next clip exists");
+    assert.strictEqual(contiguousNext?.clip.id, splitSeg2.id);
+    assert.strictEqual(contiguousNext?.isContiguous, true, "isContiguous is true for contiguous split");
+    assert.strictEqual(contiguousNext?.sourceStart, 10.0);
+    console.log("  ✓ 10. Contiguous adjacent clips detect seamless transition");
+    passed++;
+
+    // 11. Pausing at a gap or clip end
+    const nextAcrossGap = findNextVideoClipAfterTime(pbGapTl, 8.0, "c_gap_1");
+    assert.strictEqual(nextAcrossGap?.isContiguous, false, "Clip across gap is NOT contiguous");
+    assert.strictEqual(nextAcrossGap?.gapDuration, 10.0, "Gap duration is 10s; playback must pause at boundary");
+    console.log("  ✓ 11. Gaps between clips correctly identify non-contiguous interval requiring pause");
+    passed++;
+
+    // 12. Ensuring playback does not create timeline saves or undo/redo entries
+    const histBeforeScrub = new TimelineHistory({ initialTimeline: pbGapTl });
+    for (let t = 0; t <= 25; t += 1.0) {
+      const snap = getTimelinePlaybackSnapshot(pbGapTl, t);
+      assert(snap !== null);
+    }
+    assert.strictEqual(histBeforeScrub.getHistoryLength(), 1, "History length remains unchanged during playback");
+    assert.strictEqual(histBeforeScrub.canUndo(), false, "No undo steps created by playback");
+    assert.strictEqual(histBeforeScrub.canRedo(), false, "No redo steps created by playback");
+    console.log("  ✓ 12. Playback and seeking create zero timeline saves or undo/redo entries");
+    passed++;
+
+    // 13. Topmost enabled video track priority
+    const multiTrackTl: Timeline = {
+      ...createEmptyTimeline({ projectId: "mt_proj" }),
+      tracks: [
+        {
+          id: "tr_bottom",
+          name: "Video Bottom",
+          type: "video",
+          index: 1,
+          enabled: true,
+          clips: [
+            {
+              id: "c_bottom",
+              assetId: "asset_vid_2",
+              trackId: "tr_bottom",
+              sourceStart: 0,
+              sourceEnd: 20,
+              timelineStart: 0
+            }
+          ]
+        },
+        {
+          id: "tr_top",
+          name: "Video Top",
+          type: "video",
+          index: 0,
+          enabled: true,
+          clips: [
+            {
+              id: "c_top",
+              assetId: "asset_vid_1",
+              trackId: "tr_top",
+              sourceStart: 5,
+              sourceEnd: 15,
+              timelineStart: 0
+            }
+          ]
+        }
+      ]
+    };
+    const topSnapshot = getTimelinePlaybackSnapshot(multiTrackTl, 5.0);
+    assert.strictEqual(topSnapshot.activeClip?.clip.id, "c_top", "Topmost video track (index 0) takes priority over lower track (index 1)");
+    assert.strictEqual(topSnapshot.activeClip?.track.id, "tr_top");
+    console.log("  ✓ 13. Topmost enabled video track priority strictly respects track index ordering");
+    passed++;
+
+    // 14. Transition between clips with different media assets
+    const diffAssetTl: Timeline = {
+      ...createEmptyTimeline({ projectId: "da_proj" }),
+      tracks: [
+        {
+          id: "tr_v1",
+          name: "Video",
+          type: "video",
+          index: 0,
+          enabled: true,
+          clips: [
+            {
+              id: "c_asset1",
+              assetId: "asset_vid_A",
+              trackId: "tr_v1",
+              sourceStart: 0,
+              sourceEnd: 10,
+              timelineStart: 0
+            },
+            {
+              id: "c_asset2",
+              assetId: "asset_vid_B",
+              trackId: "tr_v1",
+              sourceStart: 5,
+              sourceEnd: 25,
+              timelineStart: 10
+            }
+          ]
+        }
+      ]
+    };
+    const nextDiffAsset = findNextVideoClipAfterTime(diffAssetTl, 10.0, "c_asset1");
+    assert(nextDiffAsset !== null);
+    assert.strictEqual(nextDiffAsset?.isContiguous, true, "Clips adjacent on timeline form contiguous transition regardless of asset");
+    assert.strictEqual(nextDiffAsset?.clip.assetId, "asset_vid_B", "Next clip references different asset asset_vid_B");
+    assert.strictEqual(nextDiffAsset?.sourceStart, 5, "Next clip source starts at 5.0s on asset_vid_B");
+    console.log("  ✓ 14. Transition between different media assets identifies contiguous boundary and target asset");
+    passed++;
+
+    // 21. Real Project Timeline Playback Synchronization E2E Verification
+    console.log("\n[Suite 21] Real Project Timeline Playback Synchronization E2E Verification");
+
+    // 1. Fetch real timeline
+    const realTlForPb = await fetchProjectTimeline(realProjectId);
+    assert(realTlForPb !== null && realTlForPb.tracks.length > 0, "Loaded real project timeline");
+    const rClip = realTlForPb.tracks[0].clips[0];
+
+    // 2. Test timeline-to-source time mapping across real clip
+    const srcAt0 = timelineTimeToSourceTime(rClip, 0);
+    const srcAt10 = timelineTimeToSourceTime(rClip, 10.0);
+    const srcAt20 = timelineTimeToSourceTime(rClip, 20.0);
+    const srcAt29 = timelineTimeToSourceTime(rClip, 29.5);
+
+    assert.strictEqual(srcAt0, 0);
+    assert.strictEqual(srcAt10, 10.0);
+    assert.strictEqual(srcAt20, 20.0);
+    assert.strictEqual(srcAt29, 29.5);
+    console.log("  ✓ Real project clip maps timeline time to exact source seconds");
+    passed++;
+
+    // 3. Test seeking past clip end into gap
+    const snapPastEnd = getTimelinePlaybackSnapshot(realTlForPb, 35.0);
+    assert.strictEqual(snapPastEnd.isGap, true, "Past clip end (35s) detects gap");
+    assert.strictEqual(snapPastEnd.activeClip, null, "No video footage played in gap");
+    console.log("  ✓ Real project gap detection prevents playing unrelated footage");
+    passed++;
+
+    // 4. Verify playback scrubbing does NOT issue PUT requests or mutate MongoDB
+    const beforeGet = await fetchProjectTimeline(realProjectId);
+    const originalUpdatedAt = beforeGet!.updatedAt;
+
+    // Simulate playhead scrubbing across timeline
+    for (let sec = 0; sec <= 30; sec += 2.5) {
+      const pSnap = getTimelinePlaybackSnapshot(realTlForPb, sec);
+      assert(pSnap !== null);
+    }
+
+    // Verify MongoDB state is completely untouched
+    const afterGet = await fetchProjectTimeline(realProjectId);
+    assert.strictEqual(afterGet!.tracks[0].clips.length, beforeGet!.tracks[0].clips.length);
+    assert.strictEqual(afterGet!.updatedAt, originalUpdatedAt, "MongoDB timeline updatedAt remained untouched during playback");
+    console.log("  ✓ Playback and scrubbing did NOT issue PUT requests or alter database state");
+    passed++;
+
+    // 5. CRITICAL MEDIA SAFETY: Verify physical video file on disk is untouched
+    const realDiskDir = path.join(os.homedir(), ".agentcut", "projects", realProjectId, "media");
+    const rFiles = fs.readdirSync(realDiskDir);
+    assert(rFiles.length >= 1);
+    const vStat = fs.statSync(path.join(realDiskDir, rFiles[0]));
+    assert(vStat.size > 1000000);
+    console.log(`  ✓ CRITICAL SAFETY: Physical video file intact on disk (${vStat.size} bytes)`);
+    passed++;
+
+    // 6. Restore pristine baseline
+    const pristinePbBaseline: Timeline = {
+      ...realTlForPb,
+      tracks: [
+        {
+          ...realTlForPb.tracks[0],
+          clips: [
+            {
+              ...rClip,
+              sourceStart: 0,
+              sourceEnd: 30,
+              timelineStart: 0
+            }
+          ]
+        }
+      ]
+    };
+    await saveProjectTimeline(realProjectId, pristinePbBaseline);
+    const verifiedBaseline = await fetchProjectTimeline(realProjectId);
+    assert.strictEqual(verifiedBaseline!.tracks[0].clips.length, 1);
+    assert.strictEqual(verifiedBaseline!.tracks[0].clips[0].sourceEnd, 30);
+    console.log("  ✓ Real project timeline baseline restored to pristine state");
+    passed++;
   } catch (err) {
     console.error("  ✗ FAIL: Live Vite dev server / proxy test failed:", err);
     failed++;

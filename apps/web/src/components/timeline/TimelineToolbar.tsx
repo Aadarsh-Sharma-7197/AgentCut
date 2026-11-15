@@ -7,6 +7,8 @@ interface TimelineToolbarProps {
   frameRate: number;
   currentTime: number;
   zoom: number;
+  isPlaying?: boolean;
+  onTogglePlay?: () => void;
   saveStatus?: SaveStatus;
   saveError?: string | null;
   canUndo?: boolean;
@@ -25,6 +27,8 @@ export const TimelineToolbar: React.FC<TimelineToolbarProps> = ({
   frameRate,
   currentTime,
   zoom,
+  isPlaying = false,
+  onTogglePlay,
   saveStatus = "idle",
   saveError,
   canUndo = false,
@@ -72,6 +76,13 @@ export const TimelineToolbar: React.FC<TimelineToolbarProps> = ({
       </div>
 
       <div className="timeline-toolbar-center">
+        <button
+          className={`play-pause-btn ${isPlaying ? "playing" : ""}`}
+          onClick={onTogglePlay}
+          title={isPlaying ? "Pause playback (Shortcut: Space)" : "Play timeline (Shortcut: Space)"}
+        >
+          {isPlaying ? "⏸ Pause" : "▶ Play"}
+        </button>
         <div className="playhead-time-display" title="Current Playhead Position">
           <span className="playhead-time-label">Time</span>
           <span>{formatTimeCode(currentTime)}</span>

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import type { Project, MediaAsset } from "@agentcut/shared";
-import { fetchMediaAssets, uploadMediaAsset, getMediaStreamUrl } from "../api/media";
+import { fetchMediaAssets, uploadMediaAsset } from "../api/media";
 import { TimelineEditor } from "./timeline/TimelineEditor";
 
 interface ProjectWorkspaceProps {
@@ -172,40 +172,12 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
         </div>
       )}
 
-      {/* Active Video Preview Player */}
-      {selectedAsset && (
-        <div className="video-player-container">
-          <div className="video-player-header">
-            <div>
-              <span className="video-player-title">{selectedAsset.originalName}</span>
-              <span style={{ marginLeft: "0.75rem", fontSize: "0.8rem", color: "var(--text-secondary)" }}>
-                {selectedAsset.width}×{selectedAsset.height} • {formatDuration(selectedAsset.duration)} • {selectedAsset.videoCodec}
-              </span>
-            </div>
-            <button
-              className="btn btn-secondary"
-              style={{ padding: "0.3rem 0.75rem", fontSize: "0.8rem" }}
-              onClick={() => setSelectedAsset(null)}
-            >
-              Close Player
-            </button>
-          </div>
-          <div className="video-player-wrapper">
-            <video
-              key={selectedAsset.id}
-              controls
-              playsInline
-              preload="metadata"
-              src={getMediaStreamUrl(project.id, selectedAsset.id)}
-            >
-              Your browser does not support the video tag.
-            </video>
-          </div>
-        </div>
-      )}
-
-      {/* Visual Timeline Section */}
-      <TimelineEditor projectId={project.id} mediaAssets={mediaList} />
+      {/* Visual Timeline & Synchronized Preview Section */}
+      <TimelineEditor
+        projectId={project.id}
+        mediaAssets={mediaList}
+        selectedAssetId={selectedAsset?.id}
+      />
 
       {/* Media Library Section */}
       <section className="media-section">

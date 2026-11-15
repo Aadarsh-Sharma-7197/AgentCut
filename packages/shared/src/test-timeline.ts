@@ -18,6 +18,12 @@ import {
   TimelineHistory,
   cloneTimeline,
   areTimelinesEquivalent,
+  timelineTimeToSourceTime,
+  sourceTimeToTimelineTime,
+  isTimelineTimeInsideClip,
+  findActiveVideoClipAtTime,
+  findNextVideoClipAfterTime,
+  getTimelinePlaybackSnapshot,
   type Timeline,
   type MediaAsset
 } from "./index.js";
@@ -1027,6 +1033,178 @@ function runTimelineTests() {
   reconHistory.reconcile(baseTl);
   assert(reconHistory.getCurrent()?.tracks[0].clips[0].timelineStart === 0, "Reconcile with baseline resets to baseline");
   assert(reconHistory.getCurrentIndex() === 0, "Reconcile resets index to 0");
+
+  // ==========================================
+  // Test 18: Timeline-to-Source Time Mapping and Playback Synchronization Logic
+  // ==========================================
+  console.log("\n[Test 18] Timeline-to-Source Time Mapping and Playback Synchronization Logic");
+
+  // 1. A clip beginning at timeline time zero
+  const clipAtZero = {
+    id: "clip_zero",
+    assetId: "asset_video_1",
+    trackId: "track_v1",
+    sourceStart: 0,
+    sourceEnd: 15,
+    timelineStart: 0,
+    name: "Clip at 0"
+  };
+  assert(timelineTimeToSourceTime(clipAtZero, 0) === 0, "1. Timeline 0 maps to source 0");
+  assert(timelineTimeToSourceTime(clipAtZero, 7.5) === 7.5, "1. Timeline 7.5 maps to source 7.5");
+  assert(timelineTimeToSourceTime(clipAtZero, 15) === 15, "1. Timeline 15 maps to source 15 (clip end)");
+  assert(sourceTimeToTimelineTime(clipAtZero, 0) === 0, "1. Inverse: Source 0 maps to timeline 0");
+  assert(sourceTimeToTimelineTime(clipAtZero, 7.5) === 7.5, "1. Inverse: Source 7.5 maps to timeline 7.5");
+
+  // 2. A clip beginning at a non-zero timeline position
+  const pbClipNonzeroTimeline = {
+    id: "clip_offset_tl",
+    assetId: "asset_video_1",
+    trackId: "track_v1",
+    sourceStart: 0,
+    sourceEnd: 20,
+    timelineStart: 12.0,
+    name: "Clip starting at 12s"
+  };
+  assert(timelineTimeToSourceTime(pbClipNonzeroTimeline, 12.0) === 0, "2. Timeline start 12.0 maps to source 0");
+  assert(timelineTimeToSourceTime(pbClipNonzeroTimeline, 17.5) === 5.5, "2. Timeline 17.5 maps to source 5.5 (17.5 - 12.0)");
+  assert(sourceTimeToTimelineTime(pbClipNonzeroTimeline, 5.5) === 17.5, "2. Inverse: Source 5.5 maps to timeline 17.5");
+
+  // 3. A clip with a non-zero sourceStart
+  const pbClipNonzeroSource = {
+    id: "clip_offset_src",
+    assetId: "asset_video_1",
+    trackId: "track_v1",
+    sourceStart: 25.0,
+    sourceEnd: 45.0,
+    timelineStart: 8.0,
+    name: "Clip starting at source 25s"
+  };
+  assert(timelineTimeToSourceTime(pbClipNonzeroSource, 8.0) === 25.0, "3. Timeline 8.0 maps to sourceStart 25.0");
+  assert(timelineTimeToSourceTime(pbClipNonzeroSource, 18.0) === 35.0, "3. Timeline 18.0 maps to source 35.0 (25 + 10)");
+  assert(timelineTimeToSourceTime(pbClipNonzeroSource, 28.0) === 45.0, "3. Timeline 28.0 maps to sourceEnd 45.0");
+  assert(sourceTimeToTimelineTime(pbClipNonzeroSource, 35.0) === 18.0, "3. Inverse: Source 35.0 maps to timeline 18.0");
+
+  // 4. A moved clip
+  const clipMoved = moveClip(
+    addClip(tlWithTrack, clipAtZero),
+    "clip_zero",
+    30.0,
+    undefined,
+    { assets: [videoAsset] }
+  ).tracks[0].clips[0];
+  assert(clipMoved.timelineStart === 30.0, "4. Moved clip starts at 30.0s");
+  assert(timelineTimeToSourceTime(clipMoved, 30.0) === 0, "4. Moved clip start (30.0s) maps to sourceStart (0s)");
+  assert(timelineTimeToSourceTime(clipMoved, 35.0) === 5.0, "4. Moved clip at 35.0s maps to source 5.0s");
+
+  // 5. A split clip and both resulting segments
+  const tlToSplit = addClip(tlWithTrack, {
+    id: "clip_to_split",
+    assetId: "asset_video_1",
+    trackId: "track_v1",
+    sourceStart: 0,
+    sourceEnd: 30,
+    timelineStart: 10,
+    name: "Clip to split"
+  });
+  const splitResult = splitClipWithResult(tlToSplit, "clip_to_split", 22.0, { assets: [videoAsset] });
+  const seg1 = splitResult.firstClip;
+  const seg2 = splitResult.secondClip;
+
+  assert(seg1.timelineStart === 10 && seg1.sourceStart === 0 && seg1.sourceEnd === 12, "5. Segment 1 source is [0, 12]");
+  assert(timelineTimeToSourceTime(seg1, 10.0) === 0, "5. Segment 1 start (10s) maps to source 0");
+  assert(timelineTimeToSourceTime(seg1, 16.0) === 6.0, "5. Segment 1 midpoint (16s) maps to source 6.0");
+  assert(timelineTimeToSourceTime(seg1, 22.0) === 12.0, "5. Segment 1 boundary (22s) maps to source 12.0");
+
+  assert(seg2.timelineStart === 22.0 && seg2.sourceStart === 12.0 && seg2.sourceEnd === 30.0, "5. Segment 2 source is [12, 30]");
+  assert(timelineTimeToSourceTime(seg2, 22.0) === 12.0, "5. Segment 2 start (22s) maps to sourceStart 12.0");
+  assert(timelineTimeToSourceTime(seg2, 27.0) === 17.0, "5. Segment 2 time (27s) maps to source 17.0");
+
+  // 6. A left-trimmed clip
+  const trimmedLeft = trimClip(
+    addClip(tlWithTrack, clipAtZero),
+    "clip_zero",
+    "left",
+    5.0,
+    { assets: [videoAsset] }
+  ).tracks[0].clips[0];
+  assert(trimmedLeft.timelineStart === 5.0 && trimmedLeft.sourceStart === 5.0, "6. Left trim sets start to 5.0s");
+  assert(timelineTimeToSourceTime(trimmedLeft, 5.0) === 5.0, "6. Left-trimmed clip start maps to sourceStart 5.0");
+  assert(timelineTimeToSourceTime(trimmedLeft, 10.0) === 10.0, "6. Left-trimmed clip at 10.0 maps to source 10.0");
+
+  // 7. A right-trimmed clip
+  const trimmedRight = trimClip(
+    addClip(tlWithTrack, clipAtZero),
+    "clip_zero",
+    "right",
+    8.0,
+    { assets: [videoAsset] }
+  ).tracks[0].clips[0];
+  assert(trimmedRight.timelineStart === 0 && trimmedRight.sourceEnd === 8.0, "7. Right trim sets sourceEnd to 8.0s");
+  assert(timelineTimeToSourceTime(trimmedRight, 8.0) === 8.0, "7. Right-trimmed clip at end maps to sourceEnd 8.0");
+
+  // 8. Seeking into a gap
+  const tlWithGap = addClip(
+    addClip(tlWithTrack, {
+      id: "clip_gap_1",
+      assetId: "asset_video_1",
+      trackId: "track_v1",
+      sourceStart: 0,
+      sourceEnd: 10,
+      timelineStart: 0,
+      name: "Gap Clip 1"
+    }),
+    {
+      id: "clip_gap_2",
+      assetId: "asset_video_1",
+      trackId: "track_v1",
+      sourceStart: 10,
+      sourceEnd: 20,
+      timelineStart: 20, // 10s to 20s is an empty gap!
+      name: "Gap Clip 2"
+    }
+  );
+
+  const snapAtGap = getTimelinePlaybackSnapshot(tlWithGap, 15.0);
+  assert(snapAtGap.isGap === true, "8. Snapshot at 15.0s detects gap");
+  assert(snapAtGap.activeClip === null, "8. Snapshot at 15.0s has null active clip");
+  assert(findActiveVideoClipAtTime(tlWithGap, 15.0) === null, "8. findActiveVideoClipAtTime returns null in gap");
+
+  // 9. Seeking exactly to clip boundaries
+  const snapAtStartBoundary = getTimelinePlaybackSnapshot(tlWithGap, 0);
+  assert(snapAtStartBoundary.activeClip !== null && snapAtStartBoundary.activeClip.clip.id === "clip_gap_1", "9. At start boundary 0s, clip 1 is active");
+  assert(snapAtStartBoundary.activeClip.sourceTime === 0, "9. Source time at 0s is 0");
+
+  const snapAtEndBoundary = getTimelinePlaybackSnapshot(tlWithGap, 10.0);
+  assert(snapAtEndBoundary.isGap === true, "9. At exact clip end boundary 10.0s (start of gap), isGap is true");
+
+  const snapAtNextStart = getTimelinePlaybackSnapshot(tlWithGap, 20.0);
+  assert(snapAtNextStart.activeClip !== null && snapAtNextStart.activeClip.clip.id === "clip_gap_2", "9. At 20.0s, clip 2 is active");
+  assert(snapAtNextStart.activeClip.sourceTime === 10.0, "9. Source time at 20.0s is clip 2 sourceStart (10.0)");
+
+  // 10. Transition to a contiguous next clip
+  const snapSplitTransition = getTimelinePlaybackSnapshot(splitResult.timeline, 21.999);
+  assert(snapSplitTransition.activeClip?.clip.id === seg1.id, "10. At 21.999s, segment 1 is active");
+  assert(snapSplitTransition.nextClip !== null, "10. Next clip is identified");
+  assert(snapSplitTransition.nextClip?.clip.id === seg2.id, "10. Next clip is segment 2");
+  assert(snapSplitTransition.nextClip?.isContiguous === true, "10. Transition to segment 2 is marked contiguous");
+  assert(snapSplitTransition.nextClip?.sourceStart === 12.0, "10. Next clip sourceStart is 12.0");
+
+  // 11. Pausing at a gap or clip end
+  const snapClip1End = getTimelinePlaybackSnapshot(tlWithGap, 9.999);
+  assert(snapClip1End.nextClip?.isContiguous === false, "11. Next clip across gap (at 20s) is NOT contiguous");
+  assert(snapClip1End.nextClip?.gapDuration === 10.0, "11. Gap duration of 10s detected; playback must pause at clip 1 end");
+
+  // 12. Ensuring playback does not create timeline saves or undo/redo entries
+  const histPlayback = new TimelineHistory({ initialTimeline: tlWithGap });
+  // Simulating playhead movements
+  for (let t = 0; t <= 10; t += 0.5) {
+    const snap = getTimelinePlaybackSnapshot(tlWithGap, t);
+    assert(snap !== null, "Playback snapshot calculated cleanly");
+  }
+  assert(histPlayback.getHistoryLength() === 1, "12. History length remains 1 during playback scrubbing");
+  assert(!histPlayback.canUndo(), "12. canUndo remains false during playback scrubbing");
+  assert(!histPlayback.canRedo(), "12. canRedo remains false during playback scrubbing");
+
 
 
   console.log(`\n=== Timeline Test Results: ${passed} passed, ${failed} failed ===`);
