@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import type { Timeline, MediaAsset, Clip, Track } from "@agentcut/shared";
-import { getTimelineDuration, moveClip } from "@agentcut/shared";
+import { getTimelineDuration, moveClip, splitClipWithResult } from "@agentcut/shared";
 import { fetchProjectTimeline, saveProjectTimeline } from "../../api/timeline";
 import { TimelineSaveQueue } from "../../utils/timelineSaveQueue";
 import {
@@ -175,6 +175,60 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
     },
     []
   );
+
+  // Split operation condition: clip selected AND currentTime strictly inside clip interval
+  const canSplit = useMemo(() => {
+    if (!selectedClipInfo) return false;
+    const clip = selectedClipInfo.clip;
+    const clipDuration = clip.sourceEnd - clip.sourceStart;
+    const clipTimelineEnd = clip.timelineStart + clipDuration;
+    return currentTime > clip.timelineStart && currentTime < clipTimelineEnd;
+  }, [selectedClipInfo, currentTime]);
+
+  const handleSplitClip = useCallback(() => {
+    if (!timeline || !selectedClipId || !canSplit) return;
+    try {
+      const result = splitClipWithResult(timeline, selectedClipId, currentTime, {
+        assets: mediaAssets
+      });
+
+      // 1. Optimistic UI update & serialized persistence
+      persistTimeline(result.timeline);
+
+      // 2. Select the second clip segment as preferred by requirements
+      setSelectedClipId(result.secondClip.id);
+      setNoticeMessage(null);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to split clip.";
+      setNoticeMessage(msg);
+      setTimeout(() => setNoticeMessage(null), 3500);
+    }
+  }, [timeline, selectedClipId, canSplit, currentTime, mediaAssets, persistTimeline]);
+
+  // Keyboard shortcut: Press 'S' to split selected clip at playhead
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+
+      if ((e.key === "s" || e.key === "S") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (canSplit) {
+          e.preventDefault();
+          handleSplitClip();
+        }
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [canSplit, handleSplitClip]);
 
   // Drag interaction handlers
   const handleClipDragStart = (
@@ -368,6 +422,8 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
         zoom={zoom}
         saveStatus={saveStatus}
         saveError={saveError}
+        canSplit={canSplit}
+        onSplit={handleSplitClip}
         onZoomChange={setZoom}
         onResetZoom={handleResetZoom}
       />
@@ -409,6 +465,18 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
                 {selectedClipInfo.clip.sourceStart.toFixed(1)}s–{selectedClipInfo.clip.sourceEnd.toFixed(1)}s
               </span>
             </div>
+            <button
+              className="split-inspector-btn"
+              disabled={!canSplit}
+              onClick={handleSplitClip}
+              title={
+                canSplit
+                  ? `Split at playhead (${formatTimeCode(currentTime)})`
+                  : "Move playhead inside clip to split"
+              }
+            >
+              ✂ Split
+            </button>
             <button className="deselect-btn" title="Deselect clip" onClick={handleDeselect}>
               ✕ Deselect
             </button>

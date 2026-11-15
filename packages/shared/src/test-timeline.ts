@@ -4,6 +4,8 @@ import {
   addClip,
   removeClip,
   moveClip,
+  splitClip,
+  splitClipWithResult,
   validateTimeline,
   validateClip,
   validateTrack,
@@ -466,6 +468,157 @@ function runTimelineTests() {
   assert(tClip.tracks[0].name === "Original Track", "Original track name remained unchanged after mutating returned timeline");
   assert(tClip.tracks[0].clips[0].name === "Original Clip Name", "Original clip name remained unchanged after mutating returned timeline");
   assert(tClip.tracks[0].clips[0].timelineStart === 0.0, "Original clip timelineStart remained 0.0s");
+
+  // ==========================================
+  // [Test 14] Split Clips Operations (14 Scenarios)
+  // ==========================================
+  console.log("\n[Test 14] Split Clip Operation — Comprehensive 14 Scenarios");
+
+  // Helper setup for split tests
+  const splitBaseTimeline = createEmptyTimeline({
+    projectId: "split_proj_1",
+    id: "tl_split_1",
+    settings: { frameRate: 30, width: 1920, height: 1080 }
+  });
+  const splitTrackTimeline = addTrack(splitBaseTimeline, { id: "tr_split_v1", name: "Video Track 1", type: "video" });
+
+  // 1. Splitting a clip at its midpoint
+  const clip1Timeline = addClip(splitTrackTimeline, {
+    id: "clip_midpoint",
+    assetId: videoAsset.id,
+    trackId: "tr_split_v1",
+    sourceStart: 0,
+    sourceEnd: 10,
+    timelineStart: 0
+  });
+  const midpointResult = splitClipWithResult(clip1Timeline, "clip_midpoint", 5.0, { assets: [videoAsset] });
+  assert(midpointResult.firstClip.id === "clip_midpoint", "Scenario 1: Midpoint split preserves first clip ID");
+  assert(midpointResult.firstClip.sourceStart === 0 && midpointResult.firstClip.sourceEnd === 5.0, "Scenario 1: First clip source range is [0, 5.0]");
+  assert(midpointResult.firstClip.timelineStart === 0, "Scenario 1: First clip timelineStart is 0.0");
+  assert(midpointResult.secondClip.sourceStart === 5.0 && midpointResult.secondClip.sourceEnd === 10.0, "Scenario 1: Second clip source range is [5.0, 10.0]");
+  assert(midpointResult.secondClip.timelineStart === 5.0, "Scenario 1: Second clip timelineStart is 5.0");
+
+  // 2. Splitting at an arbitrary valid position (e.g. 3.7s)
+  const arbitraryResult = splitClipWithResult(clip1Timeline, "clip_midpoint", 3.7, { assets: [videoAsset] });
+  assert(arbitraryResult.firstClip.sourceEnd === 3.7, "Scenario 2: Arbitrary split at 3.7s sets first clip sourceEnd to 3.7");
+  assert(arbitraryResult.secondClip.sourceStart === 3.7, "Scenario 2: Arbitrary split at 3.7s sets second clip sourceStart to 3.7");
+  assert(arbitraryResult.secondClip.timelineStart === 3.7, "Scenario 2: Arbitrary split at 3.7s sets second clip timelineStart to 3.7");
+
+  // 3. Splitting a clip with nonzero sourceStart
+  const clipNonzeroSource = addClip(splitTrackTimeline, {
+    id: "clip_nz_source",
+    assetId: videoAsset.id,
+    trackId: "tr_split_v1",
+    sourceStart: 10.0,
+    sourceEnd: 30.0,
+    timelineStart: 5.0
+  });
+  // timeline interval is [5.0, 25.0], duration 20s. Split at timeline 12.0s:
+  // splitOffset = 12.0 - 5.0 = 7.0; sourceSplit = 10.0 + 7.0 = 17.0
+  const nzSourceResult = splitClipWithResult(clipNonzeroSource, "clip_nz_source", 12.0, { assets: [videoAsset] });
+  assert(nzSourceResult.firstClip.sourceStart === 10.0 && nzSourceResult.firstClip.sourceEnd === 17.0, "Scenario 3: Nonzero sourceStart segment 1 source is [10.0, 17.0]");
+  assert(nzSourceResult.firstClip.timelineStart === 5.0, "Scenario 3: Nonzero sourceStart segment 1 timelineStart is 5.0");
+  assert(nzSourceResult.secondClip.sourceStart === 17.0 && nzSourceResult.secondClip.sourceEnd === 30.0, "Scenario 3: Nonzero sourceStart segment 2 source is [17.0, 30.0]");
+  assert(nzSourceResult.secondClip.timelineStart === 12.0, "Scenario 3: Nonzero sourceStart segment 2 timelineStart is 12.0");
+
+  // 4. Splitting a clip with nonzero timelineStart
+  const clipNonzeroTimeline = addClip(splitTrackTimeline, {
+    id: "clip_nz_tl",
+    assetId: videoAsset.id,
+    trackId: "tr_split_v1",
+    sourceStart: 0,
+    sourceEnd: 20.0,
+    timelineStart: 15.0
+  });
+  // timeline interval is [15.0, 35.0]. Split at timeline 22.5s:
+  // splitOffset = 22.5 - 15.0 = 7.5; sourceSplit = 0 + 7.5 = 7.5
+  const nzTlResult = splitClipWithResult(clipNonzeroTimeline, "clip_nz_tl", 22.5, { assets: [videoAsset] });
+  assert(nzTlResult.firstClip.timelineStart === 15.0 && nzTlResult.firstClip.sourceEnd === 7.5, "Scenario 4: Nonzero timelineStart segment 1 is [15.0, 22.5]");
+  assert(nzTlResult.secondClip.timelineStart === 22.5 && nzTlResult.secondClip.sourceStart === 7.5, "Scenario 4: Nonzero timelineStart segment 2 starts at 22.5s");
+
+  // 5. Preserving assetId and trackId
+  assert(midpointResult.firstClip.assetId === videoAsset.id && midpointResult.secondClip.assetId === videoAsset.id, "Scenario 5: Both segments preserve assetId");
+  assert(midpointResult.firstClip.trackId === "tr_split_v1" && midpointResult.secondClip.trackId === "tr_split_v1", "Scenario 5: Both segments preserve trackId");
+
+  // 6. Preserving original clip ID for the first segment
+  assert(midpointResult.firstClip.id === "clip_midpoint", "Scenario 6: First segment preserves original clip ID exactly");
+
+  // 7. Generating a distinct ID for the second segment
+  assert(midpointResult.secondClip.id !== midpointResult.firstClip.id, "Scenario 7: Second segment has distinct ID from first segment");
+  assert(typeof midpointResult.secondClip.id === "string" && midpointResult.secondClip.id.length > 0, "Scenario 7: Second segment has valid non-empty ID");
+
+  // 8. Ensuring both segments are adjacent without gap or overlap
+  const seg1End = midpointResult.firstClip.timelineStart + (midpointResult.firstClip.sourceEnd - midpointResult.firstClip.sourceStart);
+  assert(seg1End === midpointResult.secondClip.timelineStart, "Scenario 8: Segment 1 timeline end matches Segment 2 timeline start exactly (no gap/overlap)");
+  const trackClips = midpointResult.timeline.tracks[0].clips;
+  assert(trackClips.length === 2, "Scenario 8: Track contains both adjacent clips");
+  assert(trackClips[0].id === midpointResult.firstClip.id && trackClips[1].id === midpointResult.secondClip.id, "Scenario 8: Track preserves in-place sequential ordering");
+
+  // 9. Rejecting split at the clip start
+  let splitAtStartThrew = false;
+  try {
+    splitClip(clip1Timeline, "clip_midpoint", 0.0);
+  } catch (e: any) {
+    splitAtStartThrew = true;
+    assert(e.message.includes("strictly greater than clip start"), "Scenario 9: Error mentions split point must be strictly greater than start");
+  }
+  assert(splitAtStartThrew, "Scenario 9: Rejects split at clip start (splitTimelineTime === timelineStart)");
+
+  // 10. Rejecting split at the clip end
+  let splitAtEndThrew = false;
+  try {
+    splitClip(clip1Timeline, "clip_midpoint", 10.0);
+  } catch (e: any) {
+    splitAtEndThrew = true;
+    assert(e.message.includes("strictly less than clip end"), "Scenario 10: Error mentions split point must be strictly less than end");
+  }
+  assert(splitAtEndThrew, "Scenario 10: Rejects split at clip end (splitTimelineTime === timelineEnd)");
+
+  // 11. Rejecting split outside the clip
+  let splitBeforeThrew = false;
+  try {
+    splitClip(clipNonzeroTimeline, "clip_nz_tl", 10.0); // starts at 15.0
+  } catch {
+    splitBeforeThrew = true;
+  }
+  assert(splitBeforeThrew, "Scenario 11: Rejects split before clip start");
+
+  let splitAfterThrew = false;
+  try {
+    splitClip(clipNonzeroTimeline, "clip_nz_tl", 40.0); // ends at 35.0
+  } catch {
+    splitAfterThrew = true;
+  }
+  assert(splitAfterThrew, "Scenario 11: Rejects split after clip end");
+
+  let splitNaNThrew = false;
+  try {
+    splitClip(clip1Timeline, "clip_midpoint", NaN);
+  } catch {
+    splitNaNThrew = true;
+  }
+  assert(splitNaNThrew, "Scenario 11: Rejects split with NaN");
+
+  // 12. Rejecting nonexistent clip IDs
+  let splitNonexistentThrew = false;
+  try {
+    splitClip(clip1Timeline, "nonexistent_clip", 5.0);
+  } catch (e: any) {
+    splitNonexistentThrew = true;
+    assert(e.message.includes("not found"), "Scenario 12: Error message indicates clip was not found");
+  }
+  assert(splitNonexistentThrew, "Scenario 12: Rejects nonexistent clip ID");
+
+  // 13. Preserving original timeline immutability
+  assert(clip1Timeline.tracks[0].clips.length === 1, "Scenario 13: Original timeline tracks still has only 1 clip");
+  assert(clip1Timeline.tracks[0].clips[0].sourceEnd === 10, "Scenario 13: Original clip sourceEnd remained 10s");
+  assert(clip1Timeline.tracks[0].clips[0].id === "clip_midpoint", "Scenario 13: Original clip ID unchanged");
+
+  // 14. Validating the resulting timeline
+  const validSplitTimeline = splitClip(clip1Timeline, "clip_midpoint", 4.0, { assets: [videoAsset] });
+  const validationCheck = validateTimeline(validSplitTimeline, { assets: [videoAsset] });
+  assert(validationCheck.valid, "Scenario 14: validateTimeline confirms resulting timeline is 100% valid");
+  assert(validationCheck.errors.length === 0, "Scenario 14: Zero validation errors on split timeline");
 
   console.log(`\n=== Timeline Test Results: ${passed} passed, ${failed} failed ===`);
   if (failed > 0) {

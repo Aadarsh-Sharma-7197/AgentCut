@@ -344,3 +344,189 @@ export function moveClip(
 
   return nextTimeline;
 }
+
+export interface SplitClipOptions extends ValidateTimelineOptions {
+  newClipId?: string;
+}
+
+export interface SplitClipResult {
+  timeline: Timeline;
+  firstClip: Clip;
+  secondClip: Clip;
+}
+
+/**
+ * Splits a clip at a given timeline position into two contiguous clips immutably,
+ * returning the updated timeline along with references to both segment clips.
+ *
+ * Timing calculations:
+ *   splitOffset = splitTimelineTime - clip.timelineStart
+ *   sourceSplit = clip.sourceStart + splitOffset
+ *
+ * First clip:
+ *   - Preserves original clip ID, asset ID, track ID, and timelineStart
+ *   - Sets sourceEnd = sourceSplit
+ *
+ * Second clip:
+ *   - Assigned newly generated clip ID (or options.newClipId)
+ *   - Preserves asset ID, track ID, and sourceEnd
+ *   - Sets timelineStart = splitTimelineTime
+ *   - Sets sourceStart = sourceSplit
+ *
+ * Validation rejects:
+ *   - Nonexistent clip ID
+ *   - Non-finite or non-numeric splitTimelineTime
+ *   - Split points at or outside clip bounds (splitTimelineTime <= timelineStart or splitTimelineTime >= timelineEnd)
+ *   - Resulting clips with zero or negative duration
+ *
+ * @param timeline The input timeline (will not be mutated).
+ * @param clipId The ID of the clip to split.
+ * @param splitTimelineTime Position in timeline seconds strictly inside the clip.
+ * @param options Optional validation options (e.g. assets) and optional newClipId.
+ */
+export function splitClipWithResult(
+  timeline: Timeline,
+  clipId: string,
+  splitTimelineTime: number,
+  options?: SplitClipOptions
+): SplitClipResult {
+  if (typeof splitTimelineTime !== "number" || !Number.isFinite(splitTimelineTime)) {
+    throw new Error(`Cannot split clip: splitTimelineTime must be a finite number (got ${splitTimelineTime}).`);
+  }
+
+  let foundClip: Clip | null = null;
+  let targetTrack: Track | null = null;
+
+  for (const track of timeline.tracks) {
+    const clip = track.clips.find((c) => c.id === clipId);
+    if (clip) {
+      foundClip = clip;
+      targetTrack = track;
+      break;
+    }
+  }
+
+  if (!foundClip || !targetTrack) {
+    throw new Error(`Cannot split clip: clip '${clipId}' was not found in timeline.`);
+  }
+
+  const clipDuration = foundClip.sourceEnd - foundClip.sourceStart;
+  const clipTimelineEnd = foundClip.timelineStart + clipDuration;
+
+  if (splitTimelineTime <= foundClip.timelineStart) {
+    throw new Error(
+      `Cannot split clip: split point (${splitTimelineTime}s) must be strictly greater than clip start (${foundClip.timelineStart}s).`
+    );
+  }
+
+  if (splitTimelineTime >= clipTimelineEnd) {
+    throw new Error(
+      `Cannot split clip: split point (${splitTimelineTime}s) must be strictly less than clip end (${clipTimelineEnd}s).`
+    );
+  }
+
+  const splitOffset = splitTimelineTime - foundClip.timelineStart;
+  const sourceSplit = foundClip.sourceStart + splitOffset;
+
+  if (!Number.isFinite(sourceSplit)) {
+    throw new Error("Cannot split clip: resulting sourceSplit is not finite.");
+  }
+
+  const firstClipDuration = sourceSplit - foundClip.sourceStart;
+  const secondClipDuration = foundClip.sourceEnd - sourceSplit;
+
+  if (firstClipDuration <= 0 || secondClipDuration <= 0) {
+    throw new Error(
+      `Cannot split clip: resulting segments must have positive duration (got ${firstClipDuration}s and ${secondClipDuration}s).`
+    );
+  }
+
+  const newClipId = options?.newClipId || generateId();
+  if (newClipId === foundClip.id) {
+    throw new Error(`Cannot split clip: generated or provided clip ID cannot be the same as the original clip ID '${foundClip.id}'.`);
+  }
+
+  const idExists = timeline.tracks.some((t) => t.clips.some((c) => c.id === newClipId));
+  if (idExists) {
+    throw new Error(`Cannot split clip: clip ID '${newClipId}' already exists in timeline.`);
+  }
+
+  const firstClip: Clip = {
+    ...foundClip,
+    id: foundClip.id,
+    assetId: foundClip.assetId,
+    trackId: foundClip.trackId,
+    timelineStart: foundClip.timelineStart,
+    sourceStart: foundClip.sourceStart,
+    sourceEnd: sourceSplit
+  };
+
+  const secondClip: Clip = {
+    ...foundClip,
+    id: newClipId,
+    assetId: foundClip.assetId,
+    trackId: foundClip.trackId,
+    timelineStart: splitTimelineTime,
+    sourceStart: sourceSplit,
+    sourceEnd: foundClip.sourceEnd
+  };
+
+  const updatedTracks = timeline.tracks.map((track) => {
+    if (track.id !== targetTrack!.id) {
+      return {
+        ...track,
+        clips: track.clips.map((c) => ({ ...c }))
+      };
+    }
+
+    const updatedClips: Clip[] = [];
+    for (const clip of track.clips) {
+      if (clip.id === clipId) {
+        updatedClips.push(firstClip, secondClip);
+      } else {
+        updatedClips.push({ ...clip });
+      }
+    }
+
+    return {
+      ...track,
+      clips: updatedClips
+    };
+  });
+
+  const nextTimeline: Timeline = {
+    ...timeline,
+    settings: { ...timeline.settings },
+    tracks: updatedTracks,
+    updatedAt: new Date().toISOString()
+  };
+
+  const validation = validateTimeline(nextTimeline, options);
+  if (!validation.valid) {
+    throw new TimelineValidationError("Failed to split clip: validation error.", validation.errors);
+  }
+
+  return {
+    timeline: nextTimeline,
+    firstClip,
+    secondClip
+  };
+}
+
+/**
+ * Splits a clip at a given timeline position into two contiguous clips immutably,
+ * returning the updated timeline.
+ *
+ * @param timeline The input timeline (will not be mutated).
+ * @param clipId The ID of the clip to split.
+ * @param splitTimelineTime Position in timeline seconds strictly inside the clip.
+ * @param options Optional validation options (e.g. assets) and optional newClipId.
+ */
+export function splitClip(
+  timeline: Timeline,
+  clipId: string,
+  splitTimelineTime: number,
+  options?: SplitClipOptions
+): Timeline {
+  return splitClipWithResult(timeline, clipId, splitTimelineTime, options).timeline;
+}

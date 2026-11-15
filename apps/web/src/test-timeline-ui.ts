@@ -18,6 +18,8 @@ import {
 } from "./utils/timelineCalculations.js";
 import {
   moveClip,
+  splitClip,
+  splitClipWithResult,
   createEmptyTimeline,
   addTrack,
   addClip,
@@ -496,8 +498,152 @@ async function runAllTests() {
     assert.strictEqual((rolledBackTarget as Timeline | null)?.id, "baseline", "Rolled back to confirmed baseline");
   });
 
-  // 10. Live Vite Dev Server & API Proxy Verification
-  console.log("\n[Suite 10] Live Vite Dev Server & API Proxy Verification");
+  // 10. Split Clips Frontend Logic & State Verification
+  console.log("\n[Suite 10] Split Clips Frontend Logic & State Verification");
+
+  // Helper matching TimelineEditor.tsx canSplit logic
+  function checkCanSplit(selectedClip: Clip | null, currentTime: number): boolean {
+    if (!selectedClip) return false;
+    const clipDuration = selectedClip.sourceEnd - selectedClip.sourceStart;
+    const clipTimelineEnd = selectedClip.timelineStart + clipDuration;
+    return currentTime > selectedClip.timelineStart && currentTime < clipTimelineEnd;
+  }
+
+  const sampleClip: Clip = {
+    id: "clip_sample_1",
+    assetId: "asset_test",
+    trackId: "tr_1",
+    sourceStart: 10,
+    sourceEnd: 30, // 20s duration
+    timelineStart: 5 // timeline interval: [5, 25]
+  };
+
+  test("Split button is disabled when no clip is selected", () => {
+    assert.strictEqual(checkCanSplit(null, 10), false);
+  });
+
+  test("Split button is disabled when playhead is before clip start", () => {
+    assert.strictEqual(checkCanSplit(sampleClip, 2.0), false);
+  });
+
+  test("Split button is disabled when playhead is exactly at clip start boundary", () => {
+    assert.strictEqual(checkCanSplit(sampleClip, 5.0), false);
+  });
+
+  test("Split button is disabled when playhead is exactly at clip end boundary", () => {
+    assert.strictEqual(checkCanSplit(sampleClip, 25.0), false);
+  });
+
+  test("Split button is disabled when playhead is after clip end", () => {
+    assert.strictEqual(checkCanSplit(sampleClip, 30.0), false);
+  });
+
+  test("Split button is enabled when playhead is strictly inside clip interval", () => {
+    assert.strictEqual(checkCanSplit(sampleClip, 5.001), true);
+    assert.strictEqual(checkCanSplit(sampleClip, 15.0), true);
+    assert.strictEqual(checkCanSplit(sampleClip, 24.999), true);
+  });
+
+  test("Correct playhead-based split position and timing calculations", () => {
+    const baseTl = createEmptyTimeline({ projectId: "split_ui_proj" });
+    const trTl = addTrack(baseTl, { id: "tr_1", name: "Video", type: "video" });
+    const clipTl = addClip(trTl, sampleClip);
+
+    // Playhead at 15.0s on timeline
+    const currentTime = 15.0;
+    const splitResult = splitClipWithResult(clipTl, sampleClip.id, currentTime);
+
+    // splitOffset = 15.0 - 5.0 = 10.0; sourceSplit = 10.0 + 10.0 = 20.0
+    assert.strictEqual(splitResult.firstClip.timelineStart, 5.0);
+    assert.strictEqual(splitResult.firstClip.sourceStart, 10.0);
+    assert.strictEqual(splitResult.firstClip.sourceEnd, 20.0);
+
+    assert.strictEqual(splitResult.secondClip.timelineStart, 15.0);
+    assert.strictEqual(splitResult.secondClip.sourceStart, 20.0);
+    assert.strictEqual(splitResult.secondClip.sourceEnd, 30.0);
+    assert.notStrictEqual(splitResult.secondClip.id, sampleClip.id);
+  });
+
+  test("UI state update after splitting replaces 1 clip with 2 contiguous clips", () => {
+    const baseTl = createEmptyTimeline({ projectId: "split_ui_proj" });
+    const trTl = addTrack(baseTl, { id: "tr_1", name: "Video", type: "video" });
+    const clipTl = addClip(trTl, sampleClip);
+
+    const currentTime = 12.0;
+    const splitResult = splitClipWithResult(clipTl, sampleClip.id, currentTime);
+    const splitTimelineDirect = splitClip(clipTl, sampleClip.id, currentTime);
+    assert.strictEqual(splitTimelineDirect.tracks[0].clips.length, 2, "splitClip returns 2-clip timeline");
+
+    // Resulting track should have 2 clips replacing the single clip in-place
+    const trackClips = splitResult.timeline.tracks[0].clips;
+    assert.strictEqual(trackClips.length, 2);
+    assert.strictEqual(trackClips[0].id, sampleClip.id);
+    assert.strictEqual(trackClips[1].id, splitResult.secondClip.id);
+
+    // Contiguity: first clip ends at 12.0s, second clip starts at 12.0s
+    const firstEnd = trackClips[0].timelineStart + (trackClips[0].sourceEnd - trackClips[0].sourceStart);
+    assert.strictEqual(firstEnd, trackClips[1].timelineStart);
+
+    // Immediately after split at 12.0s, selecting second clip disables split button because playhead is at its start
+    assert.strictEqual(checkCanSplit(trackClips[1], currentTime), false);
+  });
+
+  test("Split persistence through TimelineSaveQueue updates confirmed state", async () => {
+    let savedInDB: Timeline | null = null;
+    const baseTl = createEmptyTimeline({ projectId: "split_queue_proj" });
+    const trTl = addTrack(baseTl, { id: "tr_1", name: "Video", type: "video" });
+    const initialTl = addClip(trTl, sampleClip);
+
+    const queue = new TimelineSaveQueue({
+      saveFn: async (payload) => {
+        savedInDB = payload;
+        return payload;
+      },
+      initialTimeline: initialTl
+    });
+
+    const splitResult = splitClipWithResult(initialTl, sampleClip.id, 15.0);
+    queue.enqueue(splitResult.timeline);
+
+    // Wait for queue flush
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.notStrictEqual(savedInDB, null);
+    assert.strictEqual((savedInDB as any)?.tracks[0].clips.length, 2);
+    assert.strictEqual((queue.getLastSavedTimeline() as any)?.tracks[0].clips.length, 2);
+  });
+
+  test("Rollback on failed split save restores pre-split baseline", async () => {
+    const baseTl = createEmptyTimeline({ projectId: "split_fail_proj" });
+    const trTl = addTrack(baseTl, { id: "tr_1", name: "Video", type: "video" });
+    const preSplitTl = addClip(trTl, sampleClip);
+
+    let rolledBackState: Timeline | null = null;
+    let saveFailed = false;
+
+    const queue = new TimelineSaveQueue({
+      saveFn: async () => {
+        throw new Error("Network timeout during split save");
+      },
+      onSaveError: (_err, rolledBack) => {
+        saveFailed = true;
+        rolledBackState = rolledBack;
+      },
+      initialTimeline: preSplitTl
+    });
+
+    const splitResult = splitClipWithResult(preSplitTl, sampleClip.id, 15.0);
+    queue.enqueue(splitResult.timeline);
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.strictEqual(saveFailed, true);
+    assert.strictEqual((rolledBackState as any)?.tracks[0].clips.length, 1);
+    assert.strictEqual((rolledBackState as any)?.tracks[0].clips[0].id, sampleClip.id);
+  });
+
+  // 11. Live Vite Dev Server & API Proxy Verification
+  console.log("\n[Suite 11] Live Vite Dev Server & API Proxy Verification");
   try {
     const viteRes = await fetch("http://localhost:3000/");
     assert.strictEqual(viteRes.status, 200);
@@ -540,6 +686,59 @@ async function runAllTests() {
     const finalTimeline = await fetchProjectTimeline(realProjectId);
     assert.strictEqual(finalTimeline!.tracks[0].clips[0].timelineStart, originalStart);
     console.log(`  ✓ Restored clip to original start (${originalStart}s) in database`);
+    passed++;
+
+    // 12. Real Project Split Clip E2E Persistence Test
+    console.log("\n[Suite 12] Real Project Split Clip E2E Persistence Test");
+    const preSplitTl = await fetchProjectTimeline(realProjectId);
+    assert(preSplitTl !== null && preSplitTl.tracks.length > 0, "Real timeline loaded");
+    const clipToSplit = preSplitTl.tracks[0].clips[0];
+    assert(Boolean(clipToSplit), "Target real clip found");
+
+    // Split clip at 10.0s
+    const splitPoint = 10.0;
+    const splitResult = splitClipWithResult(preSplitTl, clipToSplit.id, splitPoint);
+    assert.strictEqual(splitResult.firstClip.sourceEnd, splitPoint, "First segment sourceEnd is 10.0s");
+    assert.strictEqual(splitResult.secondClip.sourceStart, splitPoint, "Second segment sourceStart is 10.0s");
+    assert.strictEqual(splitResult.secondClip.timelineStart, splitPoint, "Second segment timelineStart is 10.0s");
+
+    // Persist split timeline to database
+    const savedSplit = await saveProjectTimeline(realProjectId, splitResult.timeline);
+    assert.strictEqual(savedSplit.tracks[0].clips.length, 2, "Persisted timeline contains 2 segments");
+    console.log("  ✓ Successfully persisted split clip to MongoDB Atlas");
+    passed++;
+
+    // Fresh GET verification
+    const freshSplitTl = await fetchProjectTimeline(realProjectId);
+    assert.strictEqual(freshSplitTl!.tracks[0].clips.length, 2, "Fresh GET retrieved 2 split clips");
+    assert.strictEqual(freshSplitTl!.tracks[0].clips[0].id, clipToSplit.id, "Segment 1 preserved original ID");
+    assert.strictEqual(freshSplitTl!.tracks[0].clips[1].id, splitResult.secondClip.id, "Segment 2 has new ID");
+    assert.strictEqual(freshSplitTl!.tracks[0].clips[0].sourceEnd, 10.0, "Segment 1 source range [0, 10]");
+    assert.strictEqual(freshSplitTl!.tracks[0].clips[1].sourceStart, 10.0, "Segment 2 source range [10, 30]");
+    console.log("  ✓ Fresh GET confirmed durable persistence of both split clips");
+    passed++;
+
+    // Restore original single clip [0, 30] so database is kept clean
+    const restoreSingleClipTl = {
+      ...freshSplitTl!,
+      tracks: [
+        {
+          ...freshSplitTl!.tracks[0],
+          clips: [
+            {
+              ...clipToSplit,
+              sourceStart: 0,
+              sourceEnd: 30,
+              timelineStart: 0
+            }
+          ]
+        }
+      ]
+    };
+    await saveProjectTimeline(realProjectId, restoreSingleClipTl);
+    const cleanedTl = await fetchProjectTimeline(realProjectId);
+    assert.strictEqual(cleanedTl!.tracks[0].clips.length, 1, "Cleaned timeline restored to 1 clip");
+    console.log("  ✓ Restored real project timeline to clean baseline");
     passed++;
   } catch (err) {
     console.error("  ✗ FAIL: Live Vite dev server / proxy test failed:", err);

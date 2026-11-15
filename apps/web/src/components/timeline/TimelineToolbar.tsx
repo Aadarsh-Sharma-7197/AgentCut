@@ -9,6 +9,8 @@ interface TimelineToolbarProps {
   zoom: number;
   saveStatus?: SaveStatus;
   saveError?: string | null;
+  canSplit?: boolean;
+  onSplit?: () => void;
   onZoomChange: (newZoom: number) => void;
   onResetZoom: () => void;
 }
@@ -19,6 +21,8 @@ export const TimelineToolbar: React.FC<TimelineToolbarProps> = ({
   zoom,
   saveStatus = "idle",
   saveError,
+  canSplit = false,
+  onSplit,
   onZoomChange,
   onResetZoom
 }) => {
@@ -60,6 +64,18 @@ export const TimelineToolbar: React.FC<TimelineToolbarProps> = ({
           <span className="playhead-time-label">Time</span>
           <span>{formatTimeCode(currentTime)}</span>
         </div>
+        <button
+          className="split-btn"
+          onClick={onSplit}
+          disabled={!canSplit}
+          title={
+            canSplit
+              ? `Split selected clip at ${formatTimeCode(currentTime)} (Shortcut: S)`
+              : "Select a clip and place playhead inside it to split"
+          }
+        >
+          ✂ Split
+        </button>
       </div>
 
       <div className="timeline-toolbar-right">
