@@ -6,6 +6,7 @@ import {
   moveClip,
   splitClip,
   splitClipWithResult,
+  trimClip,
   validateTimeline,
   validateClip,
   validateTrack,
@@ -619,6 +620,167 @@ function runTimelineTests() {
   const validationCheck = validateTimeline(validSplitTimeline, { assets: [videoAsset] });
   assert(validationCheck.valid, "Scenario 14: validateTimeline confirms resulting timeline is 100% valid");
   assert(validationCheck.errors.length === 0, "Scenario 14: Zero validation errors on split timeline");
+
+  // ==========================================
+  // [Test 15] Trim Clip Operation (Comprehensive Scenarios)
+  // ==========================================
+  console.log("\n[Test 15] Trim Clip Operation — Comprehensive Scenarios");
+
+  const trimBaseTl = createEmptyTimeline({ projectId: "trim_proj", id: "tl_trim" });
+  const trimTrackTl = addTrack(trimBaseTl, { id: "tr_trim_v1", name: "Video Track", type: "video" });
+
+  const clipInitial = addClip(trimTrackTl, {
+    id: "clip_trim_1",
+    assetId: videoAsset.id,
+    trackId: "tr_trim_v1",
+    sourceStart: 0,
+    sourceEnd: 20,
+    timelineStart: 0,
+    name: "Trim Test Clip"
+  });
+
+  // 1. Left trim: Moves beginning forward
+  const leftTrimmed = trimClip(clipInitial, "clip_trim_1", "left", 5.0, { assets: [videoAsset] });
+  const cLeft = leftTrimmed.tracks[0].clips[0];
+  assert(cLeft.timelineStart === 5.0, "Left trim sets timelineStart to 5.0s");
+  assert(cLeft.sourceStart === 5.0, "Left trim increases sourceStart to 5.0s");
+  assert(cLeft.sourceEnd === 20.0, "Left trim preserves sourceEnd at 20.0s");
+  assert(cLeft.sourceEnd - cLeft.sourceStart === 15.0, "Left trim duration is 15.0s");
+  assert(cLeft.timelineStart + (cLeft.sourceEnd - cLeft.sourceStart) === 20.0, "Left trim preserves clip timeline end at 20.0s");
+
+  // 2. Right trim: Moves end backward
+  const rightTrimmed = trimClip(clipInitial, "clip_trim_1", "right", 12.0, { assets: [videoAsset] });
+  const cRight = rightTrimmed.tracks[0].clips[0];
+  assert(cRight.timelineStart === 0.0, "Right trim preserves timelineStart at 0.0s");
+  assert(cRight.sourceStart === 0.0, "Right trim preserves sourceStart at 0.0s");
+  assert(cRight.sourceEnd === 12.0, "Right trim sets sourceEnd to 12.0s");
+  assert(cRight.sourceEnd - cRight.sourceStart === 12.0, "Right trim duration is 12.0s");
+  assert(cRight.timelineStart + (cRight.sourceEnd - cRight.sourceStart) === 12.0, "Right trim sets timeline end to 12.0s");
+
+  // 3. Nonzero sourceStart & nonzero timelineStart (left trim)
+  const clipOffset = addClip(trimTrackTl, {
+    id: "clip_offset",
+    assetId: videoAsset.id,
+    trackId: "tr_trim_v1",
+    sourceStart: 10.0,
+    sourceEnd: 30.0,
+    timelineStart: 5.0
+  }); // interval [5.0, 25.0], duration 20s
+  // Trim left edge forward from 5.0s to 8.0s (offset +3s)
+  const offsetLeftTrim = trimClip(clipOffset, "clip_offset", "left", 8.0, { assets: [videoAsset] });
+  const cOffsetLeft = offsetLeftTrim.tracks[0].clips[0];
+  assert(cOffsetLeft.timelineStart === 8.0, "Nonzero start left trim sets timelineStart to 8.0s");
+  assert(cOffsetLeft.sourceStart === 13.0, "Nonzero start left trim offsets sourceStart to 13.0s (10 + 3)");
+  assert(cOffsetLeft.sourceEnd === 30.0, "Nonzero start left trim preserves sourceEnd at 30.0s");
+  assert(cOffsetLeft.sourceEnd - cOffsetLeft.sourceStart === 17.0, "Nonzero start left trim duration is 17.0s");
+
+  // 4. Nonzero sourceStart & nonzero timelineStart (right trim)
+  // Trim right edge from 25.0s down to 20.0s (duration 20 - 5 = 15s)
+  const offsetRightTrim = trimClip(clipOffset, "clip_offset", "right", 20.0, { assets: [videoAsset] });
+  const cOffsetRight = offsetRightTrim.tracks[0].clips[0];
+  assert(cOffsetRight.timelineStart === 5.0, "Nonzero start right trim preserves timelineStart at 5.0s");
+  assert(cOffsetRight.sourceStart === 10.0, "Nonzero start right trim preserves sourceStart at 10.0s");
+  assert(cOffsetRight.sourceEnd === 25.0, "Nonzero start right trim sets sourceEnd to 25.0s (10 + 15)");
+  assert(cOffsetRight.sourceEnd - cOffsetRight.sourceStart === 15.0, "Nonzero start right trim duration is 15.0s");
+
+  // 5. Preserving clip ID, assetId, trackId, and metadata
+  assert(cLeft.id === "clip_trim_1", "Trim preserves original clip ID");
+  assert(cLeft.assetId === videoAsset.id, "Trim preserves original assetId");
+  assert(cLeft.trackId === "tr_trim_v1", "Trim preserves original trackId");
+  assert(cLeft.name === "Trim Test Clip", "Trim preserves original clip name");
+
+  // 6. Original timeline immutability
+  assert(clipInitial.tracks[0].clips[0].timelineStart === 0, "Original clip timelineStart remained 0");
+  assert(clipInitial.tracks[0].clips[0].sourceStart === 0, "Original clip sourceStart remained 0");
+  assert(clipInitial.tracks[0].clips[0].sourceEnd === 20, "Original clip sourceEnd remained 20");
+
+  // 7. Rejecting invalid boundaries
+  let leftBeyondRightThrew = false;
+  try {
+    trimClip(clipInitial, "clip_trim_1", "left", 20.0); // right edge is 20.0
+  } catch (e: any) {
+    leftBeyondRightThrew = true;
+    assert(e.message.includes("cannot be at or beyond right edge"), "Error mentions left trim cannot be at/beyond right edge");
+  }
+  assert(leftBeyondRightThrew, "Rejects left trim at or beyond right edge");
+
+  let rightBeforeLeftThrew = false;
+  try {
+    trimClip(clipInitial, "clip_trim_1", "right", 0.0); // left edge is 0.0
+  } catch (e: any) {
+    rightBeforeLeftThrew = true;
+    assert(e.message.includes("cannot be at or before left edge"), "Error mentions right trim cannot be at/before left edge");
+  }
+  assert(rightBeforeLeftThrew, "Rejects right trim at or before left edge");
+
+  let leftNegativeTimelineThrew = false;
+  try {
+    trimClip(clipInitial, "clip_trim_1", "left", -1.0);
+  } catch {
+    leftNegativeTimelineThrew = true;
+  }
+  assert(leftNegativeTimelineThrew, "Rejects left trim to negative timeline position");
+
+  let leftExceedSourceOriginThrew = false;
+  try {
+    // clipOffset sourceStart is 10.0, timelineStart is 5.0. Moving timelineStart to 0.0 tries to extend head by 5s (sourceStart 5.0) which is valid,
+    // but moving timelineStart to -6s or if timelineStart was 20 and sourceStart 5, extending by 10s would make sourceStart -5s:
+    const clipNearOrigin = addClip(trimTrackTl, {
+      id: "clip_near_origin",
+      assetId: videoAsset.id,
+      trackId: "tr_trim_v1",
+      sourceStart: 2.0,
+      sourceEnd: 15.0,
+      timelineStart: 10.0
+    });
+    // Extending left edge from 10.0s to 5.0s would offset by -5s, so sourceStart would be 2.0 - 5.0 = -3.0s:
+    trimClip(clipNearOrigin, "clip_near_origin", "left", 5.0);
+  } catch (e: any) {
+    leftExceedSourceOriginThrew = true;
+    assert(e.message.includes("exceeds media source origin"), "Error mentions exceeding source origin");
+  }
+  assert(leftExceedSourceOriginThrew, "Rejects left trim extending earlier than source origin 0.0s");
+
+  // 8. Rejecting zero and negative duration
+  let rightZeroDurationThrew = false;
+  try {
+    trimClip(clipOffset, "clip_offset", "right", 5.0); // right edge equal to left edge
+  } catch {
+    rightZeroDurationThrew = true;
+  }
+  assert(rightZeroDurationThrew, "Rejects right trim producing zero duration");
+
+  // 9. Rejecting non-finite time values
+  let nanTrimThrew = false;
+  try {
+    trimClip(clipInitial, "clip_trim_1", "right", NaN);
+  } catch {
+    nanTrimThrew = true;
+  }
+  assert(nanTrimThrew, "Rejects trim with NaN");
+
+  // 10. Rejecting missing clip
+  let missingClipThrew = false;
+  try {
+    trimClip(clipInitial, "ghost_clip", "left", 5.0);
+  } catch (e: any) {
+    missingClipThrew = true;
+    assert(e.message.includes("not found"), "Error mentions clip not found");
+  }
+  assert(missingClipThrew, "Rejects missing clip ID");
+
+  // 11. Rejecting invalid edge parameter
+  let invalidEdgeThrew = false;
+  try {
+    trimClip(clipInitial, "clip_trim_1", "top" as any, 5.0);
+  } catch {
+    invalidEdgeThrew = true;
+  }
+  assert(invalidEdgeThrew, "Rejects invalid edge parameter");
+
+  // 12. Resulting timeline validation
+  const validationOfTrim = validateTimeline(leftTrimmed, { assets: [videoAsset] });
+  assert(validationOfTrim.valid, "Resulting trimmed timeline passes validateTimeline");
 
   console.log(`\n=== Timeline Test Results: ${passed} passed, ${failed} failed ===`);
   if (failed > 0) {

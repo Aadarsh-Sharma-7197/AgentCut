@@ -204,3 +204,75 @@ export function isTrackTypeCompatible(
   return sourceType === destinationType;
 }
 
+export const MIN_CLIP_DURATION = 0.1;
+
+export interface TrimCalculationParams {
+  clip: Pick<Clip, "timelineStart" | "sourceStart" | "sourceEnd">;
+  edge: "left" | "right";
+  deltaPixels: number;
+  pps: number;
+  mediaDuration?: number;
+  minDuration?: number;
+}
+
+export interface TrimCalculationResult {
+  newTimelineStart: number;
+  newSourceStart: number;
+  newSourceEnd: number;
+  duration: number;
+}
+
+/**
+ * Calculates new clip timing during left or right edge trimming based on pixel displacement.
+ * Clamps to valid bounds:
+ * - left edge: timelineStart >= 0, sourceStart >= 0, duration >= minDuration
+ * - right edge: duration >= minDuration, sourceEnd <= mediaDuration (if provided)
+ */
+export function calculateTrimmedClip(params: TrimCalculationParams): TrimCalculationResult {
+  const { clip, edge, deltaPixels, pps, mediaDuration, minDuration = MIN_CLIP_DURATION } = params;
+  const deltaSeconds = pps > 0 ? deltaPixels / pps : 0;
+  const originalDuration = Math.max(minDuration, clip.sourceEnd - clip.sourceStart);
+  const originalTimelineEnd = clip.timelineStart + originalDuration;
+
+  if (edge === "left") {
+    const minPossibleStart = Math.max(0, clip.timelineStart - clip.sourceStart);
+    const maxPossibleStart = Math.max(minPossibleStart, originalTimelineEnd - minDuration);
+
+    const rawCandidate = clip.timelineStart + deltaSeconds;
+    const clampedStart = Math.min(Math.max(rawCandidate, minPossibleStart), maxPossibleStart);
+    const roundedStart = Math.round(clampedStart * 100) / 100;
+
+    const offset = roundedStart - clip.timelineStart;
+    const newSourceStart = Math.max(0, Math.round((clip.sourceStart + offset) * 100) / 100);
+    const newSourceEnd = clip.sourceEnd;
+    const duration = Math.max(minDuration, Math.round((newSourceEnd - newSourceStart) * 100) / 100);
+
+    return {
+      newTimelineStart: roundedStart,
+      newSourceStart,
+      newSourceEnd,
+      duration
+    };
+  } else {
+    const minPossibleEnd = clip.timelineStart + minDuration;
+    let maxPossibleEnd = Infinity;
+    if (typeof mediaDuration === "number" && mediaDuration > 0) {
+      maxPossibleEnd = clip.timelineStart + (mediaDuration - clip.sourceStart);
+    }
+
+    const rawCandidateEnd = originalTimelineEnd + deltaSeconds;
+    const clampedEnd = Math.min(Math.max(rawCandidateEnd, minPossibleEnd), maxPossibleEnd);
+    const roundedEnd = Math.round(clampedEnd * 100) / 100;
+
+    const duration = Math.max(minDuration, Math.round((roundedEnd - clip.timelineStart) * 100) / 100);
+    const newSourceEnd = Math.round((clip.sourceStart + duration) * 100) / 100;
+
+    return {
+      newTimelineStart: clip.timelineStart,
+      newSourceStart: clip.sourceStart,
+      newSourceEnd,
+      duration
+    };
+  }
+}
+

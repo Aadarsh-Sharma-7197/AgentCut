@@ -338,7 +338,7 @@
   top: 6px;
   bottom: 6px;
   border-radius: var(--radius-sm);
-  padding: 0.35rem 0.6rem;
+  padding: 0.35rem 0.4rem;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
@@ -348,6 +348,77 @@
   transition: filter 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
   user-select: none;
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+}
+
+.clip-content-container {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  height: 100%;
+  padding-left: 4px;
+  padding-right: 4px;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* Draggable Trim Handles */
+.trim-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 10px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: ew-resize;
+  opacity: 0;
+  transition: opacity 0.15s ease, background-color 0.15s ease;
+  user-select: none;
+  touch-action: none;
+}
+
+.trim-handle-left {
+  left: 0;
+  border-top-left-radius: var(--radius-sm);
+  border-bottom-left-radius: var(--radius-sm);
+}
+
+.trim-handle-right {
+  right: 0;
+  border-top-right-radius: var(--radius-sm);
+  border-bottom-right-radius: var(--radius-sm);
+}
+
+/* Trim handles visible on hover, selection, or active trim */
+.timeline-clip:hover .trim-handle,
+.timeline-clip.timeline-clip-selected .trim-handle,
+.timeline-clip.timeline-clip-trimming .trim-handle {
+  opacity: 1;
+}
+
+.trim-handle-grip {
+  width: 3px;
+  height: 16px;
+  background-color: rgba(255, 255, 255, 0.45);
+  border-radius: 2px;
+  transition: background-color 0.15s ease, height 0.15s ease;
+}
+
+.trim-handle:hover {
+  background-color: rgba(56, 189, 248, 0.35);
+}
+
+.trim-handle:hover .trim-handle-grip {
+  background-color: #38bdf8;
+  height: 22px;
+}
+
+/* Trimming Clip Active State */
+.timeline-clip.timeline-clip-trimming {
+  outline: 2px dashed #38bdf8;
+  box-shadow: 0 0 14px rgba(56, 189, 248, 0.5);
+  z-index: 22;
 }
 
 .timeline-clip:hover {

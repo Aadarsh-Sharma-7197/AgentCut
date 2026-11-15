@@ -10,6 +10,8 @@ import {
   formatRulerTime,
   formatClipDuration,
   calculateDraggedTimelineStart,
+  calculateTrimmedClip,
+  MIN_CLIP_DURATION,
   isTrackTypeCompatible,
   BASE_PIXELS_PER_SECOND,
   MIN_ZOOM,
@@ -20,6 +22,7 @@ import {
   moveClip,
   splitClip,
   splitClipWithResult,
+  trimClip,
   createEmptyTimeline,
   addTrack,
   addClip,
@@ -656,10 +659,33 @@ async function runAllTests() {
     console.log("\n[Suite 11] Real Project Interactive Clip Drag & Persistence E2E Test");
     const realProjectId = "6af851b5d8c9874f24593e12"; // "My Project"
 
-    // 1. Fetch current timeline for real project via Vite proxy
-    const tlCurrent = await fetchProjectTimeline(realProjectId);
+    // 1. Fetch current timeline for real project via Vite proxy and ensure clean baseline
+    let tlCurrent = await fetchProjectTimeline(realProjectId);
     assert(tlCurrent !== null, "Timeline exists for 'My Project'");
     assert(tlCurrent.tracks.length > 0, "Timeline contains tracks");
+
+    // Ensure clean baseline of single 30s clip [0s-30s] at timelineStart 0
+    const baselineSetupTl: Timeline = {
+      ...tlCurrent,
+      tracks: [
+        {
+          ...tlCurrent.tracks[0],
+          clips: [
+            {
+              id: "cl_actual_video_01",
+              assetId: "6af851e1d8c9874f24593e13",
+              trackId: tlCurrent.tracks[0].id,
+              sourceStart: 0,
+              sourceEnd: 30,
+              timelineStart: 0,
+              name: "2023-03-30 13-34-08 (0-30s)"
+            }
+          ]
+        }
+      ]
+    };
+    tlCurrent = await saveProjectTimeline(realProjectId, baselineSetupTl);
+
     const initialClip = tlCurrent.tracks[0].clips[0];
     assert(Boolean(initialClip), "Track contains initial real media clip");
     const originalStart = initialClip.timelineStart;
@@ -739,6 +765,268 @@ async function runAllTests() {
     const cleanedTl = await fetchProjectTimeline(realProjectId);
     assert.strictEqual(cleanedTl!.tracks[0].clips.length, 1, "Cleaned timeline restored to 1 clip");
     console.log("  ✓ Restored real project timeline to clean baseline");
+    passed++;
+
+    // 13. Trim Clips Frontend Logic & State Verification
+    console.log("\n[Suite 13] Trim Clips Frontend Logic & State Verification");
+
+    const trimSampleClip: Clip = {
+      id: "clip_trim_ui_1",
+      assetId: "asset_test",
+      trackId: "tr_1",
+      sourceStart: 10,
+      sourceEnd: 30, // 20s duration
+      timelineStart: 5 // timeline interval: [5, 25]
+    };
+
+    test("Left trim handle dragging forward reduces duration and increases start times", () => {
+      // 100px delta at pps 50 = +2.0 seconds
+      const res = calculateTrimmedClip({
+        clip: trimSampleClip,
+        edge: "left",
+        deltaPixels: 100,
+        pps: 50
+      });
+      assert.strictEqual(res.newTimelineStart, 7.0);
+      assert.strictEqual(res.newSourceStart, 12.0);
+      assert.strictEqual(res.newSourceEnd, 30.0);
+      assert.strictEqual(res.duration, 18.0);
+    });
+
+    test("Left trim handle dragging backward extends duration and decreases start times", () => {
+      // -150px delta at pps 50 = -3.0 seconds
+      const res = calculateTrimmedClip({
+        clip: trimSampleClip,
+        edge: "left",
+        deltaPixels: -150,
+        pps: 50
+      });
+      assert.strictEqual(res.newTimelineStart, 2.0);
+      assert.strictEqual(res.newSourceStart, 7.0);
+      assert.strictEqual(res.newSourceEnd, 30.0);
+      assert.strictEqual(res.duration, 23.0);
+    });
+
+    test("Right trim handle dragging backward decreases duration and reduces sourceEnd", () => {
+      // -250px delta at pps 50 = -5.0 seconds
+      const res = calculateTrimmedClip({
+        clip: trimSampleClip,
+        edge: "right",
+        deltaPixels: -250,
+        pps: 50
+      });
+      assert.strictEqual(res.newTimelineStart, 5.0);
+      assert.strictEqual(res.newSourceStart, 10.0);
+      assert.strictEqual(res.newSourceEnd, 25.0);
+      assert.strictEqual(res.duration, 15.0);
+    });
+
+    test("Right trim handle dragging forward extends duration and increases sourceEnd", () => {
+      // +200px delta at pps 50 = +4.0 seconds
+      const res = calculateTrimmedClip({
+        clip: trimSampleClip,
+        edge: "right",
+        deltaPixels: 200,
+        pps: 50
+      });
+      assert.strictEqual(res.newTimelineStart, 5.0);
+      assert.strictEqual(res.newSourceStart, 10.0);
+      assert.strictEqual(res.newSourceEnd, 34.0);
+      assert.strictEqual(res.duration, 24.0);
+    });
+
+    test("Correct time calculations at different zoom levels", () => {
+      // Zoom 0.5x (pps 25): 100px = 4.0s
+      const resLowZoom = calculateTrimmedClip({
+        clip: trimSampleClip,
+        edge: "left",
+        deltaPixels: 100,
+        pps: 25
+      });
+      assert.strictEqual(resLowZoom.newTimelineStart, 9.0);
+
+      // Zoom 2.0x (pps 100): 100px = 1.0s
+      const resHighZoom = calculateTrimmedClip({
+        clip: trimSampleClip,
+        edge: "left",
+        deltaPixels: 100,
+        pps: 100
+      });
+      assert.strictEqual(resHighZoom.newTimelineStart, 6.0);
+    });
+
+    test("Horizontal scroll compensation accurately adjusts trim displacement", () => {
+      // User moves mouse 50px right while container scrolled 30px right: total displacement = 80px
+      const deltaX = 50;
+      const scrollDelta = 30;
+      const totalPixelDisplacement = deltaX + scrollDelta;
+      const res = calculateTrimmedClip({
+        clip: trimSampleClip,
+        edge: "left",
+        deltaPixels: totalPixelDisplacement,
+        pps: 50
+      });
+      assert.strictEqual(res.newTimelineStart, 6.6); // 5.0 + 80/50 = 6.6s
+    });
+
+    test("Enforcing minimum clip duration to prevent accidental 0-duration cuts", () => {
+      // Attempting to drag left handle past the right edge (e.g. +30s)
+      const resLeftClamped = calculateTrimmedClip({
+        clip: trimSampleClip,
+        edge: "left",
+        deltaPixels: 30 * 50,
+        pps: 50
+      });
+      assert(resLeftClamped.duration >= MIN_CLIP_DURATION, "Left trim clamps to minimum duration");
+      assert(resLeftClamped.newTimelineStart < 25.0, "Left trim start stays strictly before right edge");
+
+      // Attempting to drag right handle before the left edge (e.g. -30s)
+      const resRightClamped = calculateTrimmedClip({
+        clip: trimSampleClip,
+        edge: "right",
+        deltaPixels: -30 * 50,
+        pps: 50
+      });
+      assert(resRightClamped.duration >= MIN_CLIP_DURATION, "Right trim clamps to minimum duration");
+      assert.strictEqual(resRightClamped.newTimelineStart, 5.0, "Right trim does not move clip timelineStart");
+    });
+
+    test("Trim gestures isolate the dragged edge and preserve the opposing boundary", () => {
+      // Right trim: left edge (timelineStart) does NOT move
+      const resRight = calculateTrimmedClip({
+        clip: trimSampleClip,
+        edge: "right",
+        deltaPixels: -100,
+        pps: 50
+      });
+      assert.strictEqual(resRight.newTimelineStart, trimSampleClip.timelineStart);
+
+      // Left trim: right edge (timelineEnd = 25.0s) does NOT move
+      const resLeft = calculateTrimmedClip({
+        clip: trimSampleClip,
+        edge: "left",
+        deltaPixels: 100,
+        pps: 50
+      });
+      assert.strictEqual(resLeft.newTimelineStart + resLeft.duration, 25.0);
+    });
+
+    test("Trim persistence through TimelineSaveQueue updates confirmed state", async () => {
+      let savedInDB: Timeline | null = null;
+      const baseTl = createEmptyTimeline({ projectId: "trim_queue_proj" });
+      const trTl = addTrack(baseTl, { id: "tr_1", name: "Video", type: "video" });
+      const initialTl = addClip(trTl, trimSampleClip);
+
+      const queue = new TimelineSaveQueue({
+        saveFn: async (payload) => {
+          savedInDB = payload;
+          return payload;
+        },
+        initialTimeline: initialTl
+      });
+
+      // Trim left edge from 5.0 to 8.0s
+      const trimmedTl = trimClip(initialTl, trimSampleClip.id, "left", 8.0);
+      queue.enqueue(trimmedTl);
+
+      await new Promise((r) => setTimeout(r, 50));
+
+      assert.notStrictEqual(savedInDB, null);
+      assert.strictEqual((savedInDB as any)?.tracks[0].clips[0].timelineStart, 8.0);
+      assert.strictEqual((queue.getLastSavedTimeline() as any)?.tracks[0].clips[0].timelineStart, 8.0);
+    });
+
+    test("Rollback on failed trim save restores pre-trim baseline", async () => {
+      const baseTl = createEmptyTimeline({ projectId: "trim_fail_proj" });
+      const trTl = addTrack(baseTl, { id: "tr_1", name: "Video", type: "video" });
+      const preTrimTl = addClip(trTl, trimSampleClip);
+
+      let rolledBackState: Timeline | null = null;
+      let saveFailed = false;
+
+      const queue = new TimelineSaveQueue({
+        saveFn: async () => {
+          throw new Error("Simulated network failure on trim save");
+        },
+        onSaveError: (_err, rolledBack) => {
+          saveFailed = true;
+          rolledBackState = rolledBack;
+        },
+        initialTimeline: preTrimTl
+      });
+
+      const trimmedTl = trimClip(preTrimTl, trimSampleClip.id, "left", 12.0);
+      queue.enqueue(trimmedTl);
+
+      await new Promise((r) => setTimeout(r, 50));
+
+      assert.strictEqual(saveFailed, true);
+      assert.strictEqual((rolledBackState as any)?.tracks[0].clips[0].timelineStart, 5.0);
+    });
+
+    // 14. Real Project Trim Clips E2E Persistence Test
+    console.log("\n[Suite 14] Real Project Trim Clips E2E Persistence Test");
+    const realTlPreTrim = await fetchProjectTimeline(realProjectId);
+    assert(realTlPreTrim !== null && realTlPreTrim.tracks.length > 0, "Loaded real timeline for project");
+    const clipToTrim = realTlPreTrim.tracks[0].clips[0];
+    assert.strictEqual(clipToTrim.sourceStart, 0, "Initial clip sourceStart is 0s");
+    assert.strictEqual(clipToTrim.sourceEnd, 30, "Initial clip sourceEnd is 30s");
+    assert.strictEqual(clipToTrim.timelineStart, 0, "Initial clip timelineStart is 0s");
+
+    // 1. Trim left edge from 0.0s forward to 5.0s
+    const leftTrimmedTl = trimClip(realTlPreTrim, clipToTrim.id, "left", 5.0);
+    const savedLeftTrim = await saveProjectTimeline(realProjectId, leftTrimmedTl);
+    assert.strictEqual(savedLeftTrim.tracks[0].clips[0].timelineStart, 5.0, "Saved left-trimmed timelineStart is 5.0s");
+    assert.strictEqual(savedLeftTrim.tracks[0].clips[0].sourceStart, 5.0, "Saved left-trimmed sourceStart is 5.0s");
+    assert.strictEqual(savedLeftTrim.tracks[0].clips[0].sourceEnd, 30.0, "Saved left-trimmed sourceEnd is 30.0s");
+    console.log("  ✓ Successfully persisted left trim (start: 5.0s, duration: 25.0s) to MongoDB Atlas");
+    passed++;
+
+    // 2. Fresh GET to verify left trim durability
+    const freshLeftTl = await fetchProjectTimeline(realProjectId);
+    assert.strictEqual(freshLeftTl!.tracks[0].clips[0].timelineStart, 5.0);
+    assert.strictEqual(freshLeftTl!.tracks[0].clips[0].sourceStart, 5.0);
+    console.log("  ✓ Fresh GET confirmed durable persistence of left trim");
+    passed++;
+
+    // 3. Trim right edge from 30.0s backward to 20.0s (timeline interval becomes [5.0, 20.0])
+    const rightTrimmedTl = trimClip(freshLeftTl!, clipToTrim.id, "right", 20.0);
+    const savedRightTrim = await saveProjectTimeline(realProjectId, rightTrimmedTl);
+    assert.strictEqual(savedRightTrim.tracks[0].clips[0].timelineStart, 5.0, "Right trim preserves timelineStart at 5.0s");
+    assert.strictEqual(savedRightTrim.tracks[0].clips[0].sourceStart, 5.0, "Right trim preserves sourceStart at 5.0s");
+    assert.strictEqual(savedRightTrim.tracks[0].clips[0].sourceEnd, 20.0, "Right trim sets sourceEnd to 20.0s");
+    console.log("  ✓ Successfully persisted right trim (source: 5.0s-20.0s, duration: 15.0s) to MongoDB Atlas");
+    passed++;
+
+    // 4. Fresh GET to verify right trim durability
+    const freshRightTl = await fetchProjectTimeline(realProjectId);
+    assert.strictEqual(freshRightTl!.tracks[0].clips[0].sourceEnd, 20.0);
+    assert.strictEqual(freshRightTl!.tracks[0].clips[0].timelineStart, 5.0);
+    console.log("  ✓ Fresh GET confirmed durable persistence of right trim");
+    passed++;
+
+    // 5. Restore original baseline [0s, 30s] at 0s so database remains clean
+    const restoredCleanTl = {
+      ...freshRightTl!,
+      tracks: [
+        {
+          ...freshRightTl!.tracks[0],
+          clips: [
+            {
+              ...clipToTrim,
+              sourceStart: 0,
+              sourceEnd: 30,
+              timelineStart: 0
+            }
+          ]
+        }
+      ]
+    };
+    await saveProjectTimeline(realProjectId, restoredCleanTl);
+    const finalCleanTl = await fetchProjectTimeline(realProjectId);
+    assert.strictEqual(finalCleanTl!.tracks[0].clips[0].timelineStart, 0);
+    assert.strictEqual(finalCleanTl!.tracks[0].clips[0].sourceEnd, 30);
+    console.log("  ✓ Cleaned up and restored real project timeline to [0s-30s] baseline");
     passed++;
   } catch (err) {
     console.error("  ✗ FAIL: Live Vite dev server / proxy test failed:", err);

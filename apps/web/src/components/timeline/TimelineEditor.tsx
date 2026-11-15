@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import type { Timeline, MediaAsset, Clip, Track } from "@agentcut/shared";
-import { getTimelineDuration, moveClip, splitClipWithResult } from "@agentcut/shared";
+import { getTimelineDuration, moveClip, splitClipWithResult, trimClip } from "@agentcut/shared";
 import { fetchProjectTimeline, saveProjectTimeline } from "../../api/timeline";
 import { TimelineSaveQueue } from "../../utils/timelineSaveQueue";
 import {
   calculatePixelsPerSecond,
   calculateTimelineWidth,
   calculateDraggedTimelineStart,
+  calculateTrimmedClip,
   isTrackTypeCompatible,
   formatTimeCode,
   formatClipDuration,
@@ -36,6 +37,15 @@ interface DragState {
   isCompatible: boolean;
 }
 
+interface TrimState {
+  clip: Clip;
+  edge: "left" | "right";
+  startClientX: number;
+  startScrollLeft: number;
+  previewClip: Clip;
+  mediaDuration?: number;
+}
+
 export const TimelineEditor: React.FC<TimelineEditorProps> = ({
   projectId,
   mediaAssets
@@ -49,8 +59,11 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
   // Selection state (frontend-only, non-persisted)
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
 
-  // Drag-and-drop state (frontend-only)
+  // Drag-and-drop state (horizontal movement)
   const [dragState, setDragState] = useState<DragState | null>(null);
+
+  // Trimming state (edge resize)
+  const [trimState, setTrimState] = useState<TrimState | null>(null);
 
   // Persistence & feedback states
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
@@ -100,17 +113,19 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
     return calculateTimelineWidth(timelineDuration, pps);
   }, [timelineDuration, pps]);
 
-  // Lookup details for the currently selected clip
+  // Lookup details for the currently selected clip (live during trimming)
   const selectedClipInfo = useMemo(() => {
     if (!selectedClipId || !timeline) return null;
     for (const track of timeline.tracks) {
       const clip = track.clips.find((c) => c.id === selectedClipId);
       if (clip) {
-        return { clip, track };
+        const effectiveClip =
+          trimState && trimState.clip.id === clip.id ? trimState.previewClip : clip;
+        return { clip: effectiveClip, track };
       }
     }
     return null;
-  }, [selectedClipId, timeline]);
+  }, [selectedClipId, timeline, trimState]);
 
   const handleSeek = (seconds: number) => {
     const maxBound = Math.max(30, timelineDuration + 10);
@@ -230,6 +245,33 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [canSplit, handleSplitClip]);
 
+  // Trimming interaction handlers
+  const handleClipTrimStart = (
+    clip: Clip,
+    edge: "left" | "right",
+    e: React.PointerEvent<HTMLDivElement>
+  ) => {
+    if (!timeline) return;
+
+    const startScrollLeft = scrollContainerRef.current?.scrollLeft || 0;
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {}
+
+    const asset = mediaAssets.find((a) => a.id === clip.assetId);
+
+    setTrimState({
+      clip,
+      edge,
+      startClientX: e.clientX,
+      startScrollLeft,
+      previewClip: { ...clip },
+      mediaDuration: asset?.duration
+    });
+
+    setSelectedClipId(clip.id);
+  };
+
   // Drag interaction handlers
   const handleClipDragStart = (
     clip: Clip,
@@ -266,6 +308,38 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    // 1. Handle active trim interaction
+    if (trimState) {
+      const deltaX = e.clientX - trimState.startClientX;
+      const currentScroll = scrollContainerRef.current?.scrollLeft || 0;
+      const scrollDelta = currentScroll - trimState.startScrollLeft;
+      const totalPixelDisplacement = deltaX + scrollDelta;
+
+      const result = calculateTrimmedClip({
+        clip: trimState.clip,
+        edge: trimState.edge,
+        deltaPixels: totalPixelDisplacement,
+        pps,
+        mediaDuration: trimState.mediaDuration
+      });
+
+      setTrimState((prev) =>
+        prev
+          ? {
+              ...prev,
+              previewClip: {
+                ...prev.clip,
+                timelineStart: result.newTimelineStart,
+                sourceStart: result.newSourceStart,
+                sourceEnd: result.newSourceEnd
+              }
+            }
+          : null
+      );
+      return;
+    }
+
+    // 2. Handle active clip drag interaction
     if (!dragState) return;
 
     const deltaX = e.clientX - dragState.startClientX;
@@ -314,11 +388,54 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
   };
 
   const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!dragState || !timeline) return;
-
     try {
       e.currentTarget.releasePointerCapture(e.pointerId);
     } catch {}
+
+    // 1. Release active trim interaction and persist
+    if (trimState) {
+      if (timeline) {
+        let didChange = false;
+        let finalTrimTime = 0;
+
+        if (trimState.edge === "left") {
+          didChange =
+            Math.abs(trimState.previewClip.timelineStart - trimState.clip.timelineStart) > 0.001;
+          finalTrimTime = trimState.previewClip.timelineStart;
+        } else {
+          const originalEnd =
+            trimState.clip.timelineStart + (trimState.clip.sourceEnd - trimState.clip.sourceStart);
+          const newEnd =
+            trimState.previewClip.timelineStart +
+            (trimState.previewClip.sourceEnd - trimState.previewClip.sourceStart);
+          didChange = Math.abs(newEnd - originalEnd) > 0.001;
+          finalTrimTime = newEnd;
+        }
+
+        if (didChange) {
+          try {
+            const updated = trimClip(
+              timeline,
+              trimState.clip.id,
+              trimState.edge,
+              finalTrimTime,
+              { assets: mediaAssets }
+            );
+            persistTimeline(updated);
+          } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : "Failed to trim clip.";
+            setNoticeMessage(msg);
+            setTimeout(() => setNoticeMessage(null), 3500);
+          }
+        }
+      }
+
+      setTrimState(null);
+      return;
+    }
+
+    // 2. Release active clip drag interaction and persist
+    if (!dragState || !timeline) return;
 
     if (dragState.hasMoved) {
       if (!dragState.isCompatible) {
@@ -355,6 +472,7 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
   };
 
   const handlePointerCancel = () => {
+    setTrimState(null);
     setDragState(null);
   };
 
@@ -541,12 +659,15 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
                   draggedTimelineStart={
                     dragState?.hasMoved ? dragState.currentTimelineStart : undefined
                   }
+                  trimClipId={trimState?.clip.id || null}
+                  trimPreviewClip={trimState?.previewClip}
                   isCurrentDropTarget={Boolean(isDropTarget)}
                   isDropCompatible={dragState ? dragState.isCompatible : true}
                   onSeek={handleSeek}
                   onSelectClip={handleSelectClip}
                   onDeselect={handleDeselect}
                   onClipDragStart={handleClipDragStart}
+                  onClipTrimStart={handleClipTrimStart}
                 />
               );
             })

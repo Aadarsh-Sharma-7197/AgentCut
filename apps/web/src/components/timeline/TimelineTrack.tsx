@@ -11,12 +11,15 @@ interface TimelineTrackProps {
   selectedClipId: string | null;
   draggedClipId: string | null;
   draggedTimelineStart?: number;
+  trimClipId?: string | null;
+  trimPreviewClip?: Clip;
   isCurrentDropTarget: boolean;
   isDropCompatible: boolean;
   onSeek: (seconds: number) => void;
   onSelectClip: (clipId: string) => void;
   onDeselect: () => void;
   onClipDragStart: (clip: Clip, e: React.PointerEvent<HTMLDivElement>) => void;
+  onClipTrimStart?: (clip: Clip, edge: "left" | "right", e: React.PointerEvent<HTMLDivElement>) => void;
 }
 
 export const TimelineTrack: React.FC<TimelineTrackProps> = ({
@@ -27,12 +30,15 @@ export const TimelineTrack: React.FC<TimelineTrackProps> = ({
   selectedClipId,
   draggedClipId,
   draggedTimelineStart,
+  trimClipId,
+  trimPreviewClip,
   isCurrentDropTarget,
   isDropCompatible,
   onSeek,
   onSelectClip,
   onDeselect,
-  onClipDragStart
+  onClipDragStart,
+  onClipTrimStart
 }) => {
   const getTrackIcon = (type: string) => {
     switch (type) {
@@ -95,6 +101,7 @@ export const TimelineTrack: React.FC<TimelineTrackProps> = ({
         ) : (
           track.clips.map((clip) => {
             const isDragging = draggedClipId === clip.id;
+            const isTrimming = trimClipId === clip.id;
             return (
               <TimelineClip
                 key={clip.id}
@@ -106,8 +113,11 @@ export const TimelineTrack: React.FC<TimelineTrackProps> = ({
                 isDragging={isDragging}
                 isTargetCompatible={isDragging ? isDropCompatible : true}
                 dragTimelineStart={isDragging ? draggedTimelineStart : undefined}
+                isTrimming={isTrimming}
+                trimPreviewClip={isTrimming ? trimPreviewClip : undefined}
                 onSelect={onSelectClip}
                 onDragStart={onClipDragStart}
+                onTrimStart={onClipTrimStart}
               />
             );
           })

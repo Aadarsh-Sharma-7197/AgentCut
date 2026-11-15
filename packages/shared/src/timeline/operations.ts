@@ -530,3 +530,165 @@ export function splitClip(
 ): Timeline {
   return splitClipWithResult(timeline, clipId, splitTimelineTime, options).timeline;
 }
+
+export type TrimEdge = "left" | "right";
+
+export interface TrimClipOptions extends ValidateTimelineOptions {}
+
+/**
+ * Trims a clip's left or right edge immutably.
+ *
+ * Left-edge trimming:
+ *   - newTimelineTime represents the new timeline start position.
+ *   - Increases/decreases sourceStart by the same timeline offset (newTimelineTime - timelineStart).
+ *   - Sets timelineStart = newTimelineTime.
+ *   - sourceEnd remains unchanged.
+ *   - Preserves original clip ID, assetId, trackId, and other metadata.
+ *   - Rejects if newTimelineTime < 0, newSourceStart < 0, or newTimelineTime >= timelineEnd.
+ *
+ * Right-edge trimming:
+ *   - newTimelineTime represents the new timeline end position.
+ *   - Sets sourceEnd = sourceStart + (newTimelineTime - timelineStart).
+ *   - timelineStart and sourceStart remain unchanged.
+ *   - Preserves original clip ID, assetId, trackId, and other metadata.
+ *   - Rejects if newTimelineTime <= timelineStart, or if newSourceEnd <= sourceStart.
+ *
+ * Validation rejects:
+ *   - Missing clip ID
+ *   - Invalid edge value (not "left" or "right")
+ *   - Non-finite time values (NaN, Infinity, -Infinity)
+ *   - Trims producing zero or negative duration
+ *   - Left trims beyond original right edge
+ *   - Right trims before original left edge
+ *   - Any resulting timeline that violates timeline validation
+ *
+ * @param timeline The input timeline (will not be mutated).
+ * @param clipId The ID of the clip to trim.
+ * @param edge "left" or "right".
+ * @param newTimelineTime New position of the trimmed edge in seconds.
+ * @param options Optional validation options (e.g. assets).
+ */
+export function trimClip(
+  timeline: Timeline,
+  clipId: string,
+  edge: TrimEdge,
+  newTimelineTime: number,
+  options?: TrimClipOptions
+): Timeline {
+  if (edge !== "left" && edge !== "right") {
+    throw new Error(`Cannot trim clip: edge must be 'left' or 'right' (got '${edge}').`);
+  }
+
+  if (typeof newTimelineTime !== "number" || !Number.isFinite(newTimelineTime)) {
+    throw new Error(`Cannot trim clip: newTimelineTime must be a finite number (got ${newTimelineTime}).`);
+  }
+
+  let foundClip: Clip | null = null;
+  let targetTrack: Track | null = null;
+
+  for (const track of timeline.tracks) {
+    const clip = track.clips.find((c) => c.id === clipId);
+    if (clip) {
+      foundClip = clip;
+      targetTrack = track;
+      break;
+    }
+  }
+
+  if (!foundClip || !targetTrack) {
+    throw new Error(`Cannot trim clip: clip '${clipId}' was not found in timeline.`);
+  }
+
+  const clipDuration = foundClip.sourceEnd - foundClip.sourceStart;
+  const clipTimelineEnd = foundClip.timelineStart + clipDuration;
+
+  let newTimelineStart: number;
+  let newSourceStart: number;
+  let newSourceEnd: number;
+
+  if (edge === "left") {
+    if (newTimelineTime < 0) {
+      throw new Error(`Cannot trim clip: newTimelineTime cannot be negative (got ${newTimelineTime}s).`);
+    }
+
+    if (newTimelineTime >= clipTimelineEnd) {
+      throw new Error(
+        `Cannot trim clip: left trim (${newTimelineTime}s) cannot be at or beyond right edge (${clipTimelineEnd}s).`
+      );
+    }
+
+    const offset = newTimelineTime - foundClip.timelineStart;
+    newTimelineStart = newTimelineTime;
+    newSourceStart = foundClip.sourceStart + offset;
+    newSourceEnd = foundClip.sourceEnd;
+
+    if (newSourceStart < 0) {
+      throw new Error(
+        `Cannot trim clip: left trim exceeds media source origin (newSourceStart would be ${newSourceStart}s).`
+      );
+    }
+
+    if (newSourceStart >= newSourceEnd) {
+      throw new Error(
+        `Cannot trim clip: left trim produces non-positive duration (sourceStart: ${newSourceStart}s, sourceEnd: ${newSourceEnd}s).`
+      );
+    }
+  } else {
+    // edge === "right"
+    if (newTimelineTime <= foundClip.timelineStart) {
+      throw new Error(
+        `Cannot trim clip: right trim (${newTimelineTime}s) cannot be at or before left edge (${foundClip.timelineStart}s).`
+      );
+    }
+
+    const newDuration = newTimelineTime - foundClip.timelineStart;
+    if (newDuration <= 0) {
+      throw new Error(`Cannot trim clip: right trim produces non-positive duration (${newDuration}s).`);
+    }
+
+    newTimelineStart = foundClip.timelineStart;
+    newSourceStart = foundClip.sourceStart;
+    newSourceEnd = foundClip.sourceStart + newDuration;
+
+    if (newSourceEnd <= newSourceStart) {
+      throw new Error(
+        `Cannot trim clip: right trim produces non-positive duration (sourceStart: ${newSourceStart}s, sourceEnd: ${newSourceEnd}s).`
+      );
+    }
+  }
+
+  const updatedClip: Clip = {
+    ...foundClip,
+    timelineStart: newTimelineStart,
+    sourceStart: newSourceStart,
+    sourceEnd: newSourceEnd
+  };
+
+  const updatedTracks = timeline.tracks.map((track) => {
+    if (track.id !== targetTrack!.id) {
+      return {
+        ...track,
+        clips: track.clips.map((c) => ({ ...c }))
+      };
+    }
+
+    return {
+      ...track,
+      clips: track.clips.map((c) => (c.id === clipId ? updatedClip : { ...c }))
+    };
+  });
+
+  const nextTimeline: Timeline = {
+    ...timeline,
+    settings: { ...timeline.settings },
+    tracks: updatedTracks,
+    updatedAt: new Date().toISOString()
+  };
+
+  const validation = validateTimeline(nextTimeline, options);
+  if (!validation.valid) {
+    throw new TimelineValidationError("Failed to trim clip: validation error.", validation.errors);
+  }
+
+  return nextTimeline;
+}
