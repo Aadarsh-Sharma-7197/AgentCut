@@ -15,6 +15,7 @@ import cors from "cors";
 import { AGENTCUT_VERSION, type HealthStatus } from "@agentcut/shared";
 import { connectDB } from "./config/db.js";
 import { initMediaIndexes } from "./services/media.service.js";
+import { initTimelineIndexes } from "./services/timeline.service.js";
 import { projectRouter } from "./routes/project.routes.js";
 
 const app = express();
@@ -46,6 +47,11 @@ app.use((_req: Request, res: Response) => {
 
 // Centralized Error Handler
 app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  const errorObj = err as { status?: number; statusCode?: number; message?: string };
+  if (errorObj && (errorObj.status === 400 || errorObj.statusCode === 400)) {
+    res.status(400).json({ error: "Malformed request payload." });
+    return;
+  }
   console.error("[ServerError]", err);
   res.status(500).json({ error: "An unexpected error occurred" });
 });
@@ -54,6 +60,7 @@ export async function startServer() {
   try {
     await connectDB();
     await initMediaIndexes();
+    await initTimelineIndexes();
     const server = app.listen(port, () => {
       console.log(`[Server] AgentCut API running on http://localhost:${port}`);
     });

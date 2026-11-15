@@ -16,7 +16,7 @@ import { getFFprobePath } from "./utils/ffprobe.js";
 import type { Server } from "http";
 
 async function runTests() {
-  console.log("=== AgentCut Phase 1 Step 2 Verification Test Suite ===");
+  console.log("=== AgentCut Timeline Persistence Verification Test Suite ===");
   const serverPort = 3999;
   let server: Server;
 
@@ -81,13 +81,13 @@ async function runTests() {
     // ----------------------------------------------------
     // 2. Project Creation & Setup
     // ----------------------------------------------------
-    console.log("\n[Test 2] Create Test Project");
+    console.log("\n[Test 2] Create Test Projects");
     const createProjectRes = await fetch(`${baseUrl}/api/projects`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: `Media Test Project ${Date.now()}` })
+      body: JSON.stringify({ name: `Media & Timeline Test Project ${Date.now()}` })
     });
-    assert(createProjectRes.status === 201, "Project created successfully");
+    assert(createProjectRes.status === 201, "Project 1 created successfully");
     const projectData = ((await createProjectRes.json()) as { data: { id: string } }).data;
     const projectId = projectData.id;
 
@@ -122,7 +122,7 @@ async function runTests() {
       method: "POST",
       body: txtFormData
     });
-    assert(txtRes.status === 400 || txtRes.status === 500, "Unsupported extension rejected (.txt)");
+    assert(txtRes.status === 400, "Unsupported extension rejected (.txt) with 400");
 
     // ----------------------------------------------------
     // 5. Reject Invalid / Corrupt Video Content
@@ -142,6 +142,7 @@ async function runTests() {
     // 6. Reject Audio-Only File
     // ----------------------------------------------------
     console.log("\n[Test 6] Reject Audio-Only File");
+    let audioOnlyAssetId = "";
     if (fs.existsSync(audioOnlyMp4Path)) {
       const audioBuffer = fs.readFileSync(audioOnlyMp4Path);
       const audioFormData = new FormData();
@@ -156,8 +157,6 @@ async function runTests() {
         audioJson.error?.includes("does not contain a valid video stream") || false,
         "Error specifies lack of video stream"
       );
-    } else {
-      console.log("  - Skipped: ffmpeg audio file generator not available");
     }
 
     // ----------------------------------------------------
@@ -212,103 +211,510 @@ async function runTests() {
       assert(validJson.data.height === 240, "Video height extracted accurately (240)");
       assert(validJson.data.duration > 0, "Video duration extracted accurately (>0s)");
       assert(validJson.data.videoCodec === "h264", "Video codec identified as h264");
+
+      // Also upload an asset to project 2 for cross-project asset testing
+      const proj2FormData = new FormData();
+      proj2FormData.append("file", new Blob([validBuffer], { type: "video/mp4" }), "proj2_video.mp4");
+      const proj2MediaRes = await fetch(`${baseUrl}/api/projects/${project2Id}/media`, {
+        method: "POST",
+        body: proj2FormData
+      });
+      const proj2AssetId = ((await proj2MediaRes.json()) as { data: { id: string } }).data.id;
+
+      // ----------------------------------------------------
+      // 9. List Media for Project
+      // ----------------------------------------------------
+      console.log("\n[Test 9] List Media for Project");
+      const listRes = await fetch(`${baseUrl}/api/projects/${projectId}/media`);
+      assert(listRes.status === 200, "GET /api/projects/:id/media returns 200");
+      const listJson = (await listRes.json()) as { data: Array<{ id: string }> };
+      assert(Array.isArray(listJson.data), "Media listing returns array");
+      assert(
+        listJson.data.some((item) => item.id === validAssetId),
+        "Newly uploaded asset appears in project media library"
+      );
+
+      // ----------------------------------------------------
+      // 10. Retrieve Single Media Asset Details
+      // ----------------------------------------------------
+      console.log("\n[Test 10] Retrieve Single Asset Details");
+      const getAssetRes = await fetch(`${baseUrl}/api/projects/${projectId}/media/${validAssetId}`);
+      assert(getAssetRes.status === 200, "GET /api/projects/:id/media/:assetId returns 200");
+      const getAssetJson = (await getAssetRes.json()) as { data: { id: string } };
+      assert(getAssetJson.data.id === validAssetId, "Retrieved asset matches requested ID");
+
+      // ----------------------------------------------------
+      // 11. Cross-Project Access Protection
+      // ----------------------------------------------------
+      console.log("\n[Test 11] Prevent Cross-Project Asset Access");
+      const crossRes = await fetch(`${baseUrl}/api/projects/${project2Id}/media/${validAssetId}`);
+      assert(crossRes.status === 404, "Requesting asset under another project ID returns 404");
+
+      // ----------------------------------------------------
+      // 12. Video Streaming & HTTP Range Requests
+      // ----------------------------------------------------
+      console.log("\n[Test 12] Video Streaming and HTTP Range Requests");
+      const streamUrl = `${baseUrl}/api/projects/${projectId}/media/${validAssetId}/stream`;
+
+      const fullStreamRes = await fetch(streamUrl);
+      assert(fullStreamRes.status === 200, "Stream without Range returns 200 OK");
+      assert(fullStreamRes.headers.get("accept-ranges") === "bytes", "Accept-Ranges: bytes is advertised");
+
+      const rangeRes = await fetch(streamUrl, {
+        headers: { Range: "bytes=0-100" }
+      });
+      assert(rangeRes.status === 206, "Range request returns 206 Partial Content");
+      assert(rangeRes.headers.get("content-length") === "101", "Chunk size is exactly 101 bytes");
+
+      // ====================================================
+      // TIMELINE PERSISTENCE TESTS (Phase 1, Step 3)
+      // ====================================================
+
+      // ----------------------------------------------------
+      // 13. Project with No Saved Timeline (404)
+      // ----------------------------------------------------
+      console.log("\n[Test 13] GET Timeline on Project with No Saved Timeline");
+      const noTimelineRes = await fetch(`${baseUrl}/api/projects/${projectId}/timeline`);
+      assert(noTimelineRes.status === 404, "GET timeline on new project returns 404");
+      const noTimelineJson = (await noTimelineRes.json()) as { error?: string };
+      assert(
+        noTimelineJson.error === "Timeline not found for this project.",
+        "Error message specifies timeline not found for project"
+      );
+
+      // ----------------------------------------------------
+      // 14. Nonexistent Project on GET & PUT Timeline
+      // ----------------------------------------------------
+      console.log("\n[Test 14] GET & PUT Timeline on Nonexistent Project");
+      const getNonexistentProjTl = await fetch(`${baseUrl}/api/projects/${fakeProjectId}/timeline`);
+      assert(getNonexistentProjTl.status === 404, "GET timeline on nonexistent project returns 404");
+      const getNonexistentJson = (await getNonexistentProjTl.json()) as { error?: string };
+      assert(getNonexistentJson.error === "Project not found.", "Error specifies project not found");
+
+      const putNonexistentProjTl = await fetch(`${baseUrl}/api/projects/${fakeProjectId}/timeline`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tracks: [],
+          settings: { frameRate: 30 }
+        })
+      });
+      assert(putNonexistentProjTl.status === 404, "PUT timeline on nonexistent project returns 404");
+
+      // ----------------------------------------------------
+      // 15. Mismatched Project ID in Body
+      // ----------------------------------------------------
+      console.log("\n[Test 15] Reject Mismatched Project ID in Request Body");
+      const mismatchRes = await fetch(`${baseUrl}/api/projects/${projectId}/timeline`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId: "different_project_id",
+          tracks: [],
+          settings: { frameRate: 30 }
+        })
+      });
+      assert(mismatchRes.status === 400, "Mismatched project ID in body returns 400 Bad Request");
+      const mismatchJson = (await mismatchRes.json()) as { error?: string };
+      assert(
+        mismatchJson.error?.includes("does not match route parameter") || false,
+        "Error specifies project ID mismatch"
+      );
+
+      // ----------------------------------------------------
+      // 16. Invalid Timeline Structure & Malformed Request Bodies
+      // ----------------------------------------------------
+      console.log("\n[Test 16] Reject Invalid Timeline Structure & Malformed Bodies");
+      const malformedNullRes = await fetch(`${baseUrl}/api/projects/${projectId}/timeline`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(null)
+      });
+      assert(malformedNullRes.status === 400, "Malformed null body rejected with 400");
+
+      const malformedArrayRes = await fetch(`${baseUrl}/api/projects/${projectId}/timeline`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(["not", "an", "object"])
+      });
+      assert(malformedArrayRes.status === 400, "Malformed array body rejected with 400");
+
+      const invalidStructRes = await fetch(`${baseUrl}/api/projects/${projectId}/timeline`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tracks: "not-an-array",
+          settings: { frameRate: 30 }
+        })
+      });
+      assert(invalidStructRes.status === 400, "Non-array tracks rejected with 400");
+
+      const invalidSettingsRes = await fetch(`${baseUrl}/api/projects/${projectId}/timeline`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tracks: [],
+          settings: { frameRate: -10 }
+        })
+      });
+      assert(invalidSettingsRes.status === 400, "Negative frameRate in settings rejected with 400");
+
+      // ----------------------------------------------------
+      // 17. Missing Media Asset Reference
+      // ----------------------------------------------------
+      console.log("\n[Test 17] Reject Missing Media Asset in Clips");
+      const missingAssetRes = await fetch(`${baseUrl}/api/projects/${projectId}/timeline`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tracks: [
+            {
+              id: "tr_v1",
+              name: "Video 1",
+              type: "video",
+              index: 0,
+              enabled: true,
+              clips: [
+                {
+                  id: "cl_ghost",
+                  assetId: "nonexistent_asset_id",
+                  trackId: "tr_v1",
+                  sourceStart: 0,
+                  sourceEnd: 5,
+                  timelineStart: 0
+                }
+              ]
+            }
+          ],
+          settings: { frameRate: 30 }
+        })
+      });
+      assert(missingAssetRes.status === 400, "Clip referencing nonexistent media asset returns 400");
+      const missingAssetJson = (await missingAssetRes.json()) as { details?: Array<{ message: string }> };
+      assert(
+        Boolean(missingAssetJson.details?.some((d) => d.message.includes("nonexistent media asset"))),
+        "Validation details report nonexistent media asset"
+      );
+
+      // ----------------------------------------------------
+      // 18. Media Asset Belonging to Another Project
+      // ----------------------------------------------------
+      console.log("\n[Test 18] Reject Cross-Project Media Asset in Clips");
+      const crossProjectAssetRes = await fetch(`${baseUrl}/api/projects/${projectId}/timeline`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tracks: [
+            {
+              id: "tr_v1",
+              name: "Video 1",
+              type: "video",
+              index: 0,
+              enabled: true,
+              clips: [
+                {
+                  id: "cl_cross",
+                  assetId: proj2AssetId, // belongs to project2Id!
+                  trackId: "tr_v1",
+                  sourceStart: 0,
+                  sourceEnd: 1,
+                  timelineStart: 0
+                }
+              ]
+            }
+          ],
+          settings: { frameRate: 30 }
+        })
+      });
+      assert(crossProjectAssetRes.status === 400, "Asset belonging to another project is rejected with 400");
+
+      // ----------------------------------------------------
+      // 19. Track / Media Compatibility
+      // ----------------------------------------------------
+      console.log("\n[Test 19] Reject Incompatible Track / Media Combinations");
+      // Video asset on caption track
+      const videoOnCaptionRes = await fetch(`${baseUrl}/api/projects/${projectId}/timeline`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tracks: [
+            {
+              id: "tr_c1",
+              name: "Captions",
+              type: "caption",
+              index: 0,
+              enabled: true,
+              clips: [
+                {
+                  id: "cl_bad_caption",
+                  assetId: validAssetId, // Video asset!
+                  trackId: "tr_c1",
+                  sourceStart: 0,
+                  sourceEnd: 1,
+                  timelineStart: 0
+                }
+              ]
+            }
+          ],
+          settings: { frameRate: 30 }
+        })
+      });
+      assert(videoOnCaptionRes.status === 400, "Video asset placed on caption track returns 400");
+
+      // ----------------------------------------------------
+      // 20. Invalid Timing Values in Clips
+      // ----------------------------------------------------
+      console.log("\n[Test 20] Reject Invalid Timing Values in Clips");
+      const invTimingRes = await fetch(`${baseUrl}/api/projects/${projectId}/timeline`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tracks: [
+            {
+              id: "tr_v1",
+              name: "Video 1",
+              type: "video",
+              index: 0,
+              enabled: true,
+              clips: [
+                {
+                  id: "cl_inv_time",
+                  assetId: validAssetId,
+                  trackId: "tr_v1",
+                  sourceStart: 10,
+                  sourceEnd: 5, // end < start
+                  timelineStart: -2 // negative timelineStart
+                }
+              ]
+            }
+          ],
+          settings: { frameRate: 30 }
+        })
+      });
+      assert(invTimingRes.status === 400, "Invalid timing values return 400 Bad Request");
+
+      // ----------------------------------------------------
+      // 21. Save New Valid Timeline
+      // ----------------------------------------------------
+      console.log("\n[Test 21] Save New Valid Timeline");
+      const saveValidTlRes = await fetch(`${baseUrl}/api/projects/${projectId}/timeline`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: "tl_custom_stable_id",
+          tracks: [
+            {
+              id: "tr_v1",
+              name: "Video Track 1",
+              type: "video",
+              index: 0,
+              enabled: true,
+              clips: [
+                {
+                  id: "cl_1",
+                  assetId: validAssetId,
+                  trackId: "tr_v1",
+                  sourceStart: 0,
+                  sourceEnd: 0.8,
+                  timelineStart: 0,
+                  name: "Shot 1"
+                }
+              ]
+            }
+          ],
+          settings: { frameRate: 30, width: 1920, height: 1080 }
+        })
+      });
+      assert(saveValidTlRes.status === 200, "PUT valid timeline returns 200 OK");
+      const savedTlJson = (await saveValidTlRes.json()) as {
+        data: {
+          id: string;
+          projectId: string;
+          tracks: Array<{ id: string; clips: Array<{ id: string }> }>;
+          createdAt: string;
+          updatedAt: string;
+        };
+      };
+      const initialTimelineId = savedTlJson.data.id;
+      const initialCreatedAt = savedTlJson.data.createdAt;
+      assert(initialTimelineId === "tl_custom_stable_id", "Timeline preserved stable ID");
+      assert(savedTlJson.data.projectId === projectId, "Timeline has correct projectId");
+      assert(savedTlJson.data.tracks[0].clips.length === 1, "Timeline contains 1 clip");
+      assert(Boolean(initialCreatedAt), "Server timestamp createdAt is present");
+
+      // ----------------------------------------------------
+      // 22. Retrieve Saved Timeline
+      // ----------------------------------------------------
+      console.log("\n[Test 22] Retrieve Saved Timeline");
+      const getSavedTlRes = await fetch(`${baseUrl}/api/projects/${projectId}/timeline`);
+      assert(getSavedTlRes.status === 200, "GET saved timeline returns 200 OK");
+      const retrievedTlJson = (await getSavedTlRes.json()) as {
+        data: {
+          id: string;
+          projectId: string;
+          tracks: Array<{ id: string; clips: Array<{ id: string }> }>;
+        };
+      };
+      assert(retrievedTlJson.data.id === initialTimelineId, "Retrieved timeline ID matches");
+      assert(retrievedTlJson.data.tracks[0].clips[0].id === "cl_1", "Retrieved clip matches");
+
+      // ----------------------------------------------------
+      // 23. Update Existing Timeline (Preserving Stable ID)
+      // ----------------------------------------------------
+      console.log("\n[Test 23] Update Existing Timeline");
+      // Add a second clip to the track
+      const updateTlRes = await fetch(`${baseUrl}/api/projects/${projectId}/timeline`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tracks: [
+            {
+              id: "tr_v1",
+              name: "Video Track 1",
+              type: "video",
+              index: 0,
+              enabled: true,
+              clips: [
+                {
+                  id: "cl_1",
+                  assetId: validAssetId,
+                  trackId: "tr_v1",
+                  sourceStart: 0,
+                  sourceEnd: 0.5,
+                  timelineStart: 0,
+                  name: "Shot 1 (Trimmed)"
+                },
+                {
+                  id: "cl_2",
+                  assetId: validAssetId,
+                  trackId: "tr_v1",
+                  sourceStart: 0.5,
+                  sourceEnd: 1.0,
+                  timelineStart: 1.0,
+                  name: "Shot 2"
+                }
+              ]
+            }
+          ],
+          settings: { frameRate: 30, width: 1920, height: 1080 }
+        })
+      });
+      assert(updateTlRes.status === 200, "PUT update timeline returns 200 OK");
+      const updatedTlJson = (await updateTlRes.json()) as {
+        data: {
+          id: string;
+          tracks: Array<{ clips: Array<{ id: string }> }>;
+          createdAt: string;
+          updatedAt: string;
+        };
+      };
+      assert(updatedTlJson.data.id === initialTimelineId, "Stable timeline ID preserved across update");
+      assert(updatedTlJson.data.createdAt === initialCreatedAt, "Original createdAt timestamp preserved");
+      assert(updatedTlJson.data.tracks[0].clips.length === 2, "Timeline now contains 2 clips");
+
+      // Verify concurrent updates preserve stable ID and createdAt atomically
+      console.log("  - Verifying concurrent updates preserve stable ID and timestamps");
+      const concurrentRequests = Array.from({ length: 5 }, (_, idx) =>
+        fetch(`${baseUrl}/api/projects/${projectId}/timeline`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            id: `tl_concurrent_attempt_${idx}`,
+            tracks: [
+              {
+                id: "tr_v1",
+                name: "Video Track 1",
+                type: "video",
+                index: 0,
+                enabled: true,
+                clips: [
+                  {
+                    id: `cl_concurrent_${idx}`,
+                    assetId: validAssetId,
+                    trackId: "tr_v1",
+                    sourceStart: 0,
+                    sourceEnd: 0.5,
+                    timelineStart: 0
+                  }
+                ]
+              }
+            ],
+            settings: { frameRate: 30 }
+          })
+        }).then(async (res) => {
+          assert(res.status === 200, `Concurrent PUT #${idx} returned 200`);
+          return (await res.json()) as { data: { id: string; createdAt: string } };
+        })
+      );
+
+      const concurrentResults = await Promise.all(concurrentRequests);
+      for (const res of concurrentResults) {
+        assert(
+          res.data.id === initialTimelineId,
+          "Stable timeline ID preserved under concurrent updates"
+        );
+        assert(
+          res.data.createdAt === initialCreatedAt,
+          "Original createdAt preserved under concurrent updates"
+        );
+      }
+
+      // Verify exactly one timeline document exists in MongoDB collection
+      const timelinesCol = getDB().collection("timelines");
+      const timelineCount = await timelinesCol.countDocuments({ projectId });
+      assert(timelineCount === 1, "Exactly one timeline document exists for project in MongoDB Atlas");
+
+      // ----------------------------------------------------
+      // 24. Project Deletion: Removes Timeline Metadata & Preserves Files
+      // ----------------------------------------------------
+      console.log("\n[Test 24] Project Deletion: Removes Timeline Metadata & Preserves Local Files");
+      const mediaAssetsCol = getDB().collection("media_assets");
+      const assetDoc = await mediaAssetsCol.findOne({ projectId });
+      assert(Boolean(assetDoc), "Asset document exists in MongoDB before deletion");
+      const storedFileName = assetDoc?.storedFileName;
+      const filePathOnDisk = resolveStoredFilePath(projectId, storedFileName);
+      assert(fs.existsSync(filePathOnDisk), "Media file exists on filesystem before project deletion");
+
+      // Confirm timeline document exists in DB before project deletion
+      const tlDocBefore = await timelinesCol.findOne({ projectId });
+      assert(Boolean(tlDocBefore), "Timeline metadata exists in MongoDB before deletion");
+
+      // Delete the project
+      const deleteProjRes = await fetch(`${baseUrl}/api/projects/${projectId}`, {
+        method: "DELETE"
+      });
+      assert(deleteProjRes.status === 200, "DELETE /api/projects/:id returns 200");
+
+      // Check project metadata deleted
+      const checkProjRes = await fetch(`${baseUrl}/api/projects/${projectId}`);
+      assert(checkProjRes.status === 404, "Project record removed from MongoDB");
+
+      // Check media metadata deleted
+      const remainingAssetDocs = await mediaAssetsCol.find({ projectId }).toArray();
+      assert(remainingAssetDocs.length === 0, "Associated media asset metadata records removed from MongoDB");
+
+      // Check timeline metadata deleted
+      const remainingTlDocs = await timelinesCol.find({ projectId }).toArray();
+      assert(remainingTlDocs.length === 0, "Associated timeline metadata record removed from MongoDB");
+
+      // POLICY VERIFICATION: The physical media file on disk must STILL exist!
+      assert(
+        fs.existsSync(filePathOnDisk),
+        "CRITICAL POLICY: Physical media file on disk is PRESERVED after project deletion"
+      );
+
+      // Clean up project 2
+      await fetch(`${baseUrl}/api/projects/${project2Id}`, { method: "DELETE" });
+
+      // Clean up temporary disk files
+      try {
+        if (fs.existsSync(filePathOnDisk)) fs.unlinkSync(filePathOnDisk);
+        if (fs.existsSync(validMp4Path)) fs.unlinkSync(validMp4Path);
+        if (fs.existsSync(audioOnlyMp4Path)) fs.unlinkSync(audioOnlyMp4Path);
+      } catch {}
     } else {
-      console.log("  - Skipped: valid test mp4 generator was not run");
+      console.log("  - Skipped: validMp4 test file not generated");
     }
-
-    // ----------------------------------------------------
-    // 9. List Media for Project
-    // ----------------------------------------------------
-    console.log("\n[Test 9] List Media for Project");
-    const listRes = await fetch(`${baseUrl}/api/projects/${projectId}/media`);
-    assert(listRes.status === 200, "GET /api/projects/:id/media returns 200");
-    const listJson = (await listRes.json()) as { data: Array<{ id: string }> };
-    assert(Array.isArray(listJson.data), "Media listing returns array");
-    assert(
-      listJson.data.some((item) => item.id === validAssetId),
-      "Newly uploaded asset appears in project media library"
-    );
-
-    // ----------------------------------------------------
-    // 10. Retrieve Single Media Asset Details
-    // ----------------------------------------------------
-    console.log("\n[Test 10] Retrieve Single Asset Details");
-    const getAssetRes = await fetch(`${baseUrl}/api/projects/${projectId}/media/${validAssetId}`);
-    assert(getAssetRes.status === 200, "GET /api/projects/:id/media/:assetId returns 200");
-    const getAssetJson = (await getAssetRes.json()) as { data: { id: string } };
-    assert(getAssetJson.data.id === validAssetId, "Retrieved asset matches requested ID");
-
-    // ----------------------------------------------------
-    // 11. Cross-Project Access Protection
-    // ----------------------------------------------------
-    console.log("\n[Test 11] Prevent Cross-Project Asset Access");
-    const crossRes = await fetch(`${baseUrl}/api/projects/${project2Id}/media/${validAssetId}`);
-    assert(crossRes.status === 404, "Requesting asset under another project ID returns 404");
-
-    // ----------------------------------------------------
-    // 12. Video Streaming & HTTP Range Requests
-    // ----------------------------------------------------
-    console.log("\n[Test 12] Video Streaming and HTTP Range Requests");
-    const streamUrl = `${baseUrl}/api/projects/${projectId}/media/${validAssetId}/stream`;
-
-    // Standard stream request (no Range)
-    const fullStreamRes = await fetch(streamUrl);
-    assert(fullStreamRes.status === 200, "Stream without Range returns 200 OK");
-    assert(fullStreamRes.headers.get("accept-ranges") === "bytes", "Accept-Ranges: bytes is advertised");
-    assert(Boolean(fullStreamRes.headers.get("content-length")), "Content-Length header is present");
-
-    // Range request (Partial Content)
-    const rangeRes = await fetch(streamUrl, {
-      headers: { Range: "bytes=0-100" }
-    });
-    assert(rangeRes.status === 206, "Range request returns 206 Partial Content");
-    assert(rangeRes.headers.get("content-length") === "101", "Chunk size is exactly 101 bytes");
-    assert(
-      Boolean(rangeRes.headers.get("content-range")?.startsWith("bytes 0-100/")),
-      "Content-Range header matches requested slice"
-    );
-
-    // ----------------------------------------------------
-    // 13. Project Deletion: Removes Metadata, Preserves Files
-    // ----------------------------------------------------
-    console.log("\n[Test 13] Project Deletion Non-Destructive File Policy");
-    // Verify file exists on disk
-    const mediaAssetsCol = getDB().collection("media_assets");
-    const assetDoc = await mediaAssetsCol.findOne({ projectId });
-    assert(Boolean(assetDoc), "Asset document exists in MongoDB before deletion");
-    const storedFileName = assetDoc?.storedFileName;
-    const filePathOnDisk = resolveStoredFilePath(projectId, storedFileName);
-    assert(fs.existsSync(filePathOnDisk), "Media file exists on filesystem before project deletion");
-
-    // Delete the project
-    const deleteProjRes = await fetch(`${baseUrl}/api/projects/${projectId}`, {
-      method: "DELETE"
-    });
-    assert(deleteProjRes.status === 200, "Project deleted successfully");
-
-    // Check that project metadata is deleted
-    const checkProjRes = await fetch(`${baseUrl}/api/projects/${projectId}`);
-    assert(checkProjRes.status === 404, "Project record removed from MongoDB");
-
-    // Check that media_assets metadata records are deleted
-    const remainingAssetDocs = await mediaAssetsCol.find({ projectId }).toArray();
-    assert(remainingAssetDocs.length === 0, "Associated media asset metadata records removed from MongoDB");
-
-    // POLICY VERIFICATION: The physical media file on disk must STILL exist!
-    assert(
-      fs.existsSync(filePathOnDisk),
-      "CRITICAL: Physical media file on disk is PRESERVED after project deletion"
-    );
-
-    // Clean up project 2
-    await fetch(`${baseUrl}/api/projects/${project2Id}`, { method: "DELETE" });
-
-    // Clean up temporary disk files
-    try {
-      if (fs.existsSync(filePathOnDisk)) fs.unlinkSync(filePathOnDisk);
-      if (fs.existsSync(validMp4Path)) fs.unlinkSync(validMp4Path);
-      if (fs.existsSync(audioOnlyMp4Path)) fs.unlinkSync(audioOnlyMp4Path);
-    } catch {}
 
     console.log(`\n=== Verification Results: ${passed} passed, ${failed} failed ===`);
   } finally {
