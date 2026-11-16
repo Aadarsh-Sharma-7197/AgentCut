@@ -88,6 +88,20 @@ import {
   DEFAULT_MAX_SCENES,
   MAX_ALLOWED_SCENES
 } from "./services/scene-detection.service.js";
+import {
+  getMediaIntelligenceManifest,
+  getMediaIntelligenceTimeline,
+  calculateSpeechUnionDuration,
+  evaluateOverallIntelligenceStatus,
+  verifyJpegFrameStructural,
+  checkFrameStructuralIntegrityCached,
+  resolveAudioStreamInfo,
+  validateTimelineQueryOptions,
+  round3,
+  MAX_TIMELINE_WINDOW_SECONDS,
+  MAX_RAW_BOUNDARY_CANDIDATES,
+  MAX_UNIQUE_BOUNDARIES
+} from "./services/media-intelligence.service.js";
 import { ObjectId } from "mongodb";
 import type { Server } from "http";
 
@@ -2898,9 +2912,521 @@ frame=    3 fps=0.0 q=-0.0 Lsize=N/A time=00:00:03.04 bitrate=N/A
       } catch {}
 
       // ----------------------------------------------------
+      // 41. Unified Media Intelligence Foundation (Step 5.5)
+      // ----------------------------------------------------
+      console.log("\n[Test 41] Unified Media Intelligence Foundation & Timeline API (Step 5.5)");
+
+      // 1. Unit Verification: Speech Union Duration (no double-counting)
+      const disjointIntervals = [{ start: 0, end: 2 }, { start: 3, end: 5 }];
+      assert(calculateSpeechUnionDuration(disjointIntervals) === 4, "Union of disjoint intervals sums lengths");
+
+      const overlappingIntervals = [{ start: 0, end: 3 }, { start: 2, end: 5 }];
+      assert(calculateSpeechUnionDuration(overlappingIntervals) === 5, "Union of overlapping intervals is 5, not 6 (no double-counting)");
+
+      const nestedIntervals = [{ start: 0, end: 6 }, { start: 1, end: 4 }];
+      assert(calculateSpeechUnionDuration(nestedIntervals) === 6, "Union of fully contained interval is outer duration");
+
+      const contiguousIntervals = [{ start: 0, end: 2.5 }, { start: 2.5, end: 5.5 }];
+      assert(calculateSpeechUnionDuration(contiguousIntervals) === 5.5, "Union of contiguous intervals sums properly");
+
+      // 2. Unit Verification: Overall Intelligence Status Precedence Matrix
+      const allNotStarted: Record<string, any> = { audio: "not_started", silence: "not_started", transcription: "not_started", scenes: "not_started" };
+      assert(evaluateOverallIntelligenceStatus(allNotStarted, ["audio", "silence", "transcription", "scenes"]) === "empty", "All not_started -> empty");
+
+      const oneProcessing: Record<string, any> = { audio: "processing", silence: "not_started", transcription: "not_started", scenes: "not_started" };
+      assert(evaluateOverallIntelligenceStatus(oneProcessing, ["audio", "silence", "transcription", "scenes"]) === "processing", "One processing and none completed -> processing");
+
+      const mixedFailedAndProcessing: Record<string, any> = { audio: "failed", silence: "processing", transcription: "not_started", scenes: "not_started" };
+      assert(evaluateOverallIntelligenceStatus(mixedFailedAndProcessing, ["audio", "silence", "transcription", "scenes"]) === "processing", "Mixed failed and processing modalities remain processing (failed does not override active processing)");
+
+      const oneCompleted: Record<string, any> = { audio: "completed", silence: "processing", transcription: "not_started", scenes: "not_started" };
+      assert(evaluateOverallIntelligenceStatus(oneCompleted, ["audio", "silence", "transcription", "scenes"]) === "partial", "At least one completed but not all applicable completed -> partial");
+
+      const allCompleted: Record<string, any> = { audio: "completed", silence: "completed", transcription: "completed", scenes: "completed" };
+      assert(evaluateOverallIntelligenceStatus(allCompleted, ["audio", "silence", "transcription", "scenes"]) === "completed", "All applicable completed -> completed");
+
+      const allCanceled: Record<string, any> = { audio: "canceled", silence: "canceled", transcription: "canceled", scenes: "canceled" };
+      assert(evaluateOverallIntelligenceStatus(allCanceled, ["audio", "silence", "transcription", "scenes"]) === "canceled", "All terminal canceled -> canceled");
+
+      const mixedFailedCanceled: Record<string, any> = { audio: "canceled", silence: "failed", transcription: "canceled", scenes: "canceled" };
+      assert(evaluateOverallIntelligenceStatus(mixedFailedCanceled, ["audio", "silence", "transcription", "scenes"]) === "failed", "Terminal mix of failed and canceled -> failed");
+
+      // No-audio asset: applicable modalities = ['scenes']
+      const noAudioOnlyScenesCompleted: Record<string, any> = { audio: "no_stream", silence: "no_stream", transcription: "no_stream", scenes: "completed" };
+      assert(evaluateOverallIntelligenceStatus(noAudioOnlyScenesCompleted, ["scenes"]) === "completed", "Audio-less asset: when scenes completes, overall is completed");
+
+      // 3. Unit Verification: JPEG Frame Structural Validation & Request-Scoped Cache
+      const testJpegDir = path.join(tempDir, "intel_jpeg_test");
+      fs.mkdirSync(testJpegDir, { recursive: true });
+
+      const emptyJpeg = path.join(testJpegDir, "empty.jpg");
+      fs.writeFileSync(emptyJpeg, Buffer.alloc(0));
+      assert((await verifyJpegFrameStructural(emptyJpeg)) === false, "0-byte file fails structural JPEG validation");
+
+      const smallJpeg = path.join(testJpegDir, "small.jpg");
+      fs.writeFileSync(smallJpeg, Buffer.alloc(64));
+      assert((await verifyJpegFrameStructural(smallJpeg)) === false, "File smaller than 128 bytes fails structural JPEG validation");
+
+      const badMagicJpeg = path.join(testJpegDir, "bad_magic.jpg");
+      const badBuf = Buffer.alloc(200);
+      badBuf[0] = 0x00; badBuf[1] = 0x00;
+      fs.writeFileSync(badMagicJpeg, badBuf);
+      assert((await verifyJpegFrameStructural(badMagicJpeg)) === false, "Invalid header bytes fail structural JPEG validation");
+
+      const validJpeg = path.join(testJpegDir, "valid.jpg");
+      const validBuf = Buffer.alloc(256);
+      validBuf[0] = 0xff; validBuf[1] = 0xd8; // SOI
+      validBuf[254] = 0xff; validBuf[255] = 0xd9; // EOI
+      fs.writeFileSync(validJpeg, validBuf);
+      assert((await verifyJpegFrameStructural(validJpeg)) === true, "Valid SOI and EOI markers >= 128 bytes pass structural JPEG validation");
+
+      // Request-scoped cache verification
+      const testCache = new Map<string, boolean>();
+      const cachedRes1 = await checkFrameStructuralIntegrityCached(validJpeg, testCache);
+      assert(cachedRes1 === true && testCache.has(validJpeg), "Frame verification result cached in Map");
+      // Overwrite file on disk to bad content; cached check must still return cached true without disk read
+      fs.writeFileSync(validJpeg, Buffer.alloc(10));
+      const cachedRes2 = await checkFrameStructuralIntegrityCached(validJpeg, testCache);
+      assert(cachedRes2 === true, "Cached frame verification uses Map and avoids re-reading disk");
+
+      // 4. Unit Verification: Timeline Query Options Validation
+      let threwNegStart = false;
+      try { validateTimelineQueryOptions(100, { start: -1, end: 50 }); } catch { threwNegStart = true; }
+      assert(threwNegStart, "Negative start throws 400 validation error");
+
+      let threwReversed = false;
+      try { validateTimelineQueryOptions(100, { start: 60, end: 50 }); } catch { threwReversed = true; }
+      assert(threwReversed, "start >= end throws 400 validation error");
+
+      let threwOutOfDuration = false;
+      try { validateTimelineQueryOptions(100, { start: 100, end: 110 }); } catch { threwOutOfDuration = true; }
+      assert(threwOutOfDuration, "start >= duration throws 400 validation error");
+
+      let threwHugeWindow = false;
+      try { validateTimelineQueryOptions(10000, { start: 0, end: 3601 }); } catch { threwHugeWindow = true; }
+      assert(threwHugeWindow, "Window > 3600s throws 400 error");
+
+      let threwInvalidInclude = false;
+      try { validateTimelineQueryOptions(100, { include: "scenes,invalid_token" }); } catch { threwInvalidInclude = true; }
+      assert(threwInvalidInclude, "Invalid include token throws 400 error");
+
+      const defaultParsed = validateTimelineQueryOptions(100, {});
+      assert(defaultParsed.start === 0 && defaultParsed.end === 100, "Default window spans 0 to media duration");
+      assert(defaultParsed.include.has("scenes") && defaultParsed.include.has("speech") && defaultParsed.include.has("silence"), "Default include includes all 3 modalities");
+
+      const clampedEnd = validateTimelineQueryOptions(100, { start: 0, end: 150 });
+      assert(clampedEnd.end === 100, "end exceeding media duration is clamped to media duration");
+
+      // ----------------------------------------------------
+      // Integration Setup for Step 5.5 Tests
+      // ----------------------------------------------------
+      const projectsCol = getDB().collection("projects");
+      const sceneDetectionsCol = getDB().collection("scene_detections");
+
+      const intelProjId = new ObjectId().toHexString();
+      await projectsCol.insertOne({
+        _id: new ObjectId(intelProjId),
+        name: "Media Intelligence Test Project",
+        createdAt: new Date(),
+        updatedAt: new Date()
+      });
+
+      // Asset 1: Standard Asset With Audio
+      const intelAssetId = new ObjectId().toHexString();
+      const intelStoredFile = `intel_test_${intelAssetId}.mp4`;
+      const intelMediaDiskPath = resolveStoredFilePath(intelProjId, intelStoredFile);
+      fs.writeFileSync(intelMediaDiskPath, "dummy video media data");
+
+      await mediaAssetsCol.insertOne({
+        _id: new ObjectId(intelAssetId),
+        projectId: intelProjId,
+        originalName: "intel_video.mp4",
+        storedFileName: intelStoredFile,
+        fileSize: 1024,
+        mimeType: "video/mp4",
+        duration: 60.0,
+        width: 1920,
+        height: 1080,
+        frameRate: "30/1",
+        videoCodec: "h264",
+        audioCodec: "aac",
+        format: "mp4",
+        createdAt: new Date()
+      });
+
+      // 5. Integration Verification: Empty State & Filesystem Path Privacy
+      const initIntelRes = await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence`);
+      assert(initIntelRes.status === 200, "GET /intelligence returns 200 OK");
+      const initIntelRaw = await initIntelRes.text();
+      assert(!initIntelRaw.includes("C:\\") && !initIntelRaw.includes("/Users/"), "API response never leaks server filesystem paths");
+      assert(!initIntelRaw.includes("artifactPath"), "Internal artifactPath is strictly omitted from API response");
+
+      const initIntelJson = JSON.parse(initIntelRaw).data;
+      assert(initIntelJson.overallStatus === "empty", "Initial overallStatus is empty");
+      assert(initIntelJson.hasAudio === true, "hasAudio is true for asset with audioCodec: aac");
+      assert(initIntelJson.modalities.audio.status === "not_started", "audio status is not_started");
+      assert(initIntelJson.modalities.silence.status === "not_started", "silence status is not_started");
+      assert(initIntelJson.modalities.transcription.status === "not_started", "transcription status is not_started");
+      assert(initIntelJson.modalities.scenes.status === "not_started", "scenes status is not_started");
+
+      // 6. Integration Verification: Read-Only Invariant (Zero DB Mutations)
+      const mediaBeforeQuery = await mediaAssetsCol.findOne({ _id: new ObjectId(intelAssetId) });
+      await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence`);
+      await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence/timeline`);
+      const mediaAfterQuery = await mediaAssetsCol.findOne({ _id: new ObjectId(intelAssetId) });
+      assert(JSON.stringify(mediaBeforeQuery) === JSON.stringify(mediaAfterQuery), "Strictly read-only: GET endpoints perform ZERO writes or mutations to MongoDB");
+
+      // 7. Integration Verification: Dynamic Modality Status Progression & Mixed Status
+      // Audio extracting -> overall processing
+      await audioExtractionsCol.insertOne({
+        _id: new ObjectId(),
+        projectId: intelProjId,
+        assetId: intelAssetId,
+        status: "extracting",
+        createdAt: new Date(),
+        updatedAt: new Date()
+      });
+      const manifestProc = (await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence`)).json()).data;
+      assert(manifestProc.overallStatus === "processing", "Modality extracting makes overallStatus processing");
+
+      // Audio failed + Silence detecting -> overall remains processing
+      await audioExtractionsCol.updateOne({ projectId: intelProjId, assetId: intelAssetId }, { $set: { status: "failed", error: "FFmpeg extraction error" } });
+      await silenceDetectionsCol.insertOne({
+        _id: new ObjectId(),
+        projectId: intelProjId,
+        assetId: intelAssetId,
+        status: "detecting",
+        parameters: { noiseThresholdDb: -30, minDurationSeconds: 0.5 },
+        intervals: [],
+        totalSilenceDuration: 0,
+        audioDuration: 60,
+        createdAt: new Date(),
+        updatedAt: new Date()
+      });
+      const manifestMixed = (await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence`)).json()).data;
+      assert(manifestMixed.overallStatus === "processing", "Mixed failed + active processing modality keeps overallStatus as processing");
+
+      // Silence completed -> overall becomes partial
+      await silenceDetectionsCol.updateOne(
+        { projectId: intelProjId, assetId: intelAssetId },
+        {
+          $set: {
+            status: "completed",
+            intervals: [
+              { start: 10.0, end: 15.0, duration: 5.0 },
+              { start: 40.0, end: 45.0, duration: 5.0 }
+            ],
+            totalSilenceDuration: 10.0
+          }
+        }
+      );
+      const manifestPartial = (await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence`)).json()).data;
+      assert(manifestPartial.overallStatus === "partial", "Completed silence detection makes overallStatus partial");
+      assert(manifestPartial.aggregated.silenceDuration === 10.0, "Aggregated silenceDuration matches completed intervals");
+
+      // 8. Integration Verification: Artifact Existence & Missing File Downgrades
+      // Audio marked completed in DB, but WAV file missing on disk -> downgrades audio status to failed
+      await audioExtractionsCol.updateOne({ projectId: intelProjId, assetId: intelAssetId }, { $set: { status: "completed" } });
+      const manifestAudioMissing = (await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence`)).json()).data;
+      assert(manifestAudioMissing.modalities.audio.status === "failed", "Audio status downgraded to failed when audio.wav is missing on disk");
+      assert(manifestAudioMissing.modalities.audio.hasArtifact === false, "audio hasArtifact is false when file missing");
+      assert(!manifestAudioMissing.modalities.audio.error.includes("C:\\"), "Audio missing error does not expose filesystem paths");
+
+      // Create audio.wav on disk
+      const intelAudioWavPath = resolveAssetAnalysisAudioPath(intelProjId, intelAssetId);
+      fs.writeFileSync(intelAudioWavPath, "dummy wav data");
+      const manifestAudioPresent = (await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence`)).json()).data;
+      assert(manifestAudioPresent.modalities.audio.status === "completed", "Audio status completed when audio.wav is confirmed on disk");
+      assert(manifestAudioPresent.modalities.audio.hasArtifact === true, "audio hasArtifact is true when file present");
+
+      // 9. Integration Verification: Transcription Artifact & Cross-Slice Boundary Words
+      const intelTranscriptPath = resolveAssetTranscriptPath(intelProjId, intelAssetId);
+      const transcriptDataContent = {
+        language: "en",
+        languageProbability: 0.99,
+        duration: 60.0,
+        text: "Hello world and welcome to AgentCut media intelligence testing.",
+        segments: [
+          {
+            id: 1,
+            start: 18.0,
+            end: 22.0,
+            text: "welcome to AgentCut",
+            words: [
+              { word: "welcome", start: 18.2, end: 19.5, probability: 0.98 },
+              // Word crossing boundary at 20.0 seconds:
+              { word: "to", start: 19.8, end: 20.3, probability: 0.95 },
+              { word: "AgentCut", start: 20.5, end: 21.8, probability: 0.99 }
+            ]
+          }
+        ]
+      };
+      fs.writeFileSync(intelTranscriptPath, JSON.stringify(transcriptDataContent));
+
+      await transcriptionsCol.insertOne({
+        _id: new ObjectId(),
+        projectId: intelProjId,
+        assetId: intelAssetId,
+        status: "completed",
+        parameters: { modelName: "base" },
+        segmentCount: 1,
+        audioDuration: 60,
+        createdAt: new Date(),
+        updatedAt: new Date()
+      });
+
+      const manifestTx = (await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence`)).json()).data;
+      assert(manifestTx.modalities.transcription.status === "completed", "Transcription status completed when transcript.json exists");
+      assert(manifestTx.modalities.transcription.hasArtifact === true, "transcription hasArtifact is true");
+      assert(manifestTx.modalities.transcription.wordCount === 3, "wordCount parsed correctly from transcript segments");
+      assert(manifestTx.aggregated.speechDuration === 4.0, "speechDuration union computed correctly");
+
+      // 10. Integration Verification: Scene Frame Structural Integrity Check
+      const intelSceneAnalysisId = new ObjectId().toHexString();
+      const scene1Id = "scene_001";
+      const scene2Id = "scene_002";
+
+      // Create dummy scenes directory and frame files
+      const scene1FramePath = resolveSceneFramePath(intelProjId, intelAssetId, intelSceneAnalysisId, scene1Id);
+      const scene2FramePath = resolveSceneFramePath(intelProjId, intelAssetId, intelSceneAnalysisId, scene2Id);
+
+      // Scene 1 frame: valid structural JPEG
+      const validFrameBuf = Buffer.alloc(300);
+      validFrameBuf[0] = 0xff; validFrameBuf[1] = 0xd8; // SOI
+      validFrameBuf[298] = 0xff; validFrameBuf[299] = 0xd9; // EOI
+      fs.writeFileSync(scene1FramePath, validFrameBuf);
+
+      // Scene 2 frame: corrupted / 0-byte file
+      fs.writeFileSync(scene2FramePath, Buffer.alloc(0));
+
+      await sceneDetectionsCol.insertOne({
+        _id: new ObjectId(intelSceneAnalysisId),
+        projectId: intelProjId,
+        assetId: intelAssetId,
+        status: "completed",
+        parameters: { threshold: 0.3, minSceneDuration: 0.5, maxScenes: 500 },
+        scenes: [
+          { id: scene1Id, index: 0, start: 0, end: 20.0, duration: 20.0, representativeTimestamp: 10.0, frameAvailable: true },
+          { id: scene2Id, index: 1, start: 20.0, end: 60.0, duration: 40.0, representativeTimestamp: 40.0, frameAvailable: true }
+        ],
+        sceneCount: 2,
+        videoDuration: 60.0,
+        createdAt: new Date(),
+        updatedAt: new Date()
+      });
+
+      // Manifest check with corrupt frame: scenes status must downgrade to failed
+      const manifestCorruptFrame = (await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence`)).json()).data;
+      assert(manifestCorruptFrame.modalities.scenes.status === "failed", "Scenes status downgrades to failed when a referenced frame is corrupted");
+      assert(manifestCorruptFrame.modalities.scenes.error === "Scene frame artifact is missing or corrupted on server", "Sanitized error message for corrupted frame");
+
+      // Timeline check with corrupt frame: frameUrl must be null for invalid frame, NOT a broken URL
+      const timelineCorruptFrameRes = await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence/timeline?start=0&end=30`);
+      const timelineCorruptFrame = (await timelineCorruptFrameRes.json()).data;
+      const sliceWithCorruptScene = timelineCorruptFrame.slices.find((s: any) => s.scene?.sceneId === scene2Id);
+      assert(sliceWithCorruptScene && sliceWithCorruptScene.scene.frameUrl === null, "frameUrl is null for structurally invalid scene frame");
+
+      // Fix Scene 2 frame: make it a valid JPEG
+      const validFrame2Buf = Buffer.alloc(400);
+      validFrame2Buf[0] = 0xff; validFrame2Buf[1] = 0xd8;
+      validFrame2Buf[398] = 0xff; validFrame2Buf[399] = 0xd9;
+      fs.writeFileSync(scene2FramePath, validFrame2Buf);
+
+      // Now all modalities completed! Overall status must become "completed"
+      const manifestAllDone = (await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence`)).json()).data;
+      assert(manifestAllDone.modalities.scenes.status === "completed", "Scenes status completed when all frames pass structural validation");
+      assert(manifestAllDone.overallStatus === "completed", "Overall status is completed when every applicable modality is completed");
+
+      // 11. Integration Verification: Timeline Slicing & Boundary Math
+      const timelineRes = await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence/timeline?start=15&end=25`);
+      assert(timelineRes.status === 200, "GET /intelligence/timeline returns 200 OK");
+      const timelineData = (await timelineRes.json()).data;
+
+      assert(timelineData.window.start === 15 && timelineData.window.end === 25 && timelineData.window.duration === 10, "Timeline window correctly parsed");
+      assert(timelineData.slices.length > 0, "Timeline produced valid slices");
+
+      // Verify every slice has positive duration
+      for (const slice of timelineData.slices) {
+        assert(slice.end > slice.start, "Every emitted slice has strictly positive duration");
+        assert(round3(slice.duration) === round3(slice.end - slice.start), "Slice duration matches end - start");
+      }
+
+      // Verify Word Spanning Across Slice Boundary:
+      // Word "to" spans [19.8, 20.3]. The scene cut boundary is at 20.0.
+      // Slices covering [..., 20.0) and [20.0, ...) must BOTH include word "to".
+      const slicePreCut = timelineData.slices.find((s: any) => s.start <= 19.8 && s.end === 20.0);
+      const slicePostCut = timelineData.slices.find((s: any) => s.start === 20.0);
+
+      assert(Boolean(slicePreCut), "Found slice ending at scene cut boundary (20.0)");
+      assert(Boolean(slicePostCut), "Found slice starting at scene cut boundary (20.0)");
+
+      const wordInPre = slicePreCut.speechWords.find((w: any) => w.word === "to");
+      const wordInPost = slicePostCut.speechWords.find((w: any) => w.word === "to");
+      assert(Boolean(wordInPre), "Spanning word 'to' is present in slice before cut");
+      assert(Boolean(wordInPost), "Spanning word 'to' is present in slice after cut");
+      assert(wordInPre.start === 19.8 && wordInPre.end === 20.3, "Word retains global timestamps in pre-cut slice");
+      assert(wordInPost.start === 19.8 && wordInPost.end === 20.3, "Word retains global timestamps in post-cut slice");
+
+      // Verify scene covering midpoint and canonical frame URL
+      assert(slicePreCut.scene.sceneId === scene1Id, "Pre-cut slice midpoint associates with scene 1");
+      assert(
+        slicePreCut.scene.frameUrl === `/api/projects/${intelProjId}/media/${intelAssetId}/scenes/analyses/${intelSceneAnalysisId}/frames/${scene1Id}`,
+        "Canonical frame URL uses Step 5.4 route structure"
+      );
+      assert(slicePostCut.scene.sceneId === scene2Id, "Post-cut slice midpoint associates with scene 2");
+      assert(
+        slicePostCut.scene.frameUrl === `/api/projects/${intelProjId}/media/${intelAssetId}/scenes/analyses/${intelSceneAnalysisId}/frames/${scene2Id}`,
+        "Canonical frame URL uses Step 5.4 route structure for scene 2"
+      );
+
+      // Verify speech / silence coexistence:
+      // Request window [10, 15] which is silence, and add a small speech word to verify coexistence
+      const silenceWindowRes = await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence/timeline?start=10&end=15`);
+      const silenceWindowData = (await silenceWindowRes.json()).data;
+      assert(silenceWindowData.slices.every((s: any) => s.isSilence === true), "Slices in silence window report isSilence: true");
+
+      // 12. Integration Verification: Timeline Limit Enforcement & Error Handling
+      // Invalid time range
+      const badRangeRes = await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence/timeline?start=30&end=20`);
+      assert(badRangeRes.status === 400, "start >= end returns 400 Bad Request");
+
+      // Window > 3600 seconds
+      const hugeWindowRes = await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence/timeline?start=0&end=3700`);
+      assert(hugeWindowRes.status === 400, "Window > 3600s returns 400 Bad Request");
+      const hugeWindowJson = await hugeWindowRes.json();
+      assert(hugeWindowJson.error.includes("exceeds maximum allowed duration"), "Error message explains window limit");
+
+      // Invalid include token
+      const badIncludeRes = await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence/timeline?include=scenes,video_extra`);
+      assert(badIncludeRes.status === 400, "Invalid include token returns 400 Bad Request");
+      const badIncludeJson = await badIncludeRes.json();
+      assert(badIncludeJson.error.includes("Invalid include parameter"), "Error message explains supported include values");
+
+      // 13. Integration Verification: Confirmed No-Audio Asset Handling
+      const noAudioAssetId = new ObjectId().toHexString();
+      await mediaAssetsCol.insertOne({
+        _id: new ObjectId(noAudioAssetId),
+        projectId: intelProjId,
+        originalName: "no_audio.mp4",
+        storedFileName: "no_audio.mp4",
+        fileSize: 500,
+        mimeType: "video/mp4",
+        duration: 30.0,
+        width: 1280,
+        height: 720,
+        frameRate: "25",
+        videoCodec: "h264",
+        audioCodec: null, // Confirmed no audio stream!
+        format: "mp4",
+        createdAt: new Date()
+      });
+
+      const noAudioManifest = (await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${noAudioAssetId}/intelligence`)).json()).data;
+      assert(noAudioManifest.hasAudio === false, "Confirmed no-audio has hasAudio: false");
+      assert(noAudioManifest.modalities.audio.status === "no_stream", "Audio modality status is no_stream");
+      assert(noAudioManifest.modalities.silence.status === "no_stream", "Silence modality status is no_stream");
+      assert(noAudioManifest.modalities.transcription.status === "no_stream", "Transcription modality status is no_stream");
+      assert(noAudioManifest.modalities.scenes.status === "not_started", "Scenes modality is not_started");
+      assert(noAudioManifest.overallStatus === "empty", "No-audio asset overallStatus is empty when scenes not started");
+
+      // 14. Integration Verification: Undefined Audio Stream Fallback & Unknown Availability
+      // Case A: Missing metadata with accessible file
+      const unprobedAssetId = new ObjectId().toHexString();
+      const unprobedFileName = `unprobed_${unprobedAssetId}.mp4`;
+      const unprobedDiskPath = resolveStoredFilePath(intelProjId, unprobedFileName);
+      fs.copyFileSync(validMp4Path, unprobedDiskPath);
+
+      const unprobedDoc: any = {
+        _id: new ObjectId(unprobedAssetId),
+        projectId: intelProjId,
+        originalName: "unprobed.mp4",
+        storedFileName: unprobedFileName, // validMp4 has no audio
+        fileSize: 2048,
+        mimeType: "video/mp4",
+        duration: 3.0,
+        width: 320,
+        height: 240,
+        frameRate: "25",
+        videoCodec: "h264",
+        // audioCodec is intentionally omitted to simulate legacy/unprobed metadata
+        format: "mp4",
+        createdAt: new Date()
+      };
+      await mediaAssetsCol.insertOne(unprobedDoc);
+
+      const probedManifest = (await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${unprobedAssetId}/intelligence`)).json()).data;
+      assert(probedManifest.hasAudio === false, "In-memory FFprobe fallback identified no audio for validMp4");
+      // Verify MongoDB document was NOT mutated
+      const docAfterProbe = await mediaAssetsCol.findOne({ _id: new ObjectId(unprobedAssetId) });
+      assert(docAfterProbe?.audioCodec === undefined, "Fallback probe result was NOT persisted to MongoDB");
+
+      // Case B: Missing metadata with inaccessible file -> stream availability is unknown
+      const unknownAssetId = new ObjectId().toHexString();
+      const unknownDoc: any = {
+        _id: new ObjectId(unknownAssetId),
+        projectId: intelProjId,
+        originalName: "missing_file.mp4",
+        storedFileName: "nonexistent_file_12345.mp4",
+        fileSize: 100,
+        mimeType: "video/mp4",
+        duration: 10.0,
+        width: 1920,
+        height: 1080,
+        frameRate: "30",
+        videoCodec: "h264",
+        // audioCodec is intentionally omitted
+        format: "mp4",
+        createdAt: new Date()
+      };
+      await mediaAssetsCol.insertOne(unknownDoc);
+
+      const unknownManifest = (await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${unknownAssetId}/intelligence`)).json()).data;
+      assert(unknownManifest.hasAudio === null, "hasAudio is null (unknown) when file is inaccessible");
+      assert(unknownManifest.modalities.audio.status === "not_started", "Audio modality reports not_started, not no_stream");
+
+      // Even if scenes completes for asset with unknown audio availability, overallStatus cannot be completed
+      const unknownSceneAnalysisId = new ObjectId().toHexString();
+      const unknownSceneFramePath = resolveSceneFramePath(intelProjId, unknownAssetId, unknownSceneAnalysisId, "sc_01");
+      fs.writeFileSync(unknownSceneFramePath, validFrameBuf);
+      await sceneDetectionsCol.insertOne({
+        _id: new ObjectId(unknownSceneAnalysisId),
+        projectId: intelProjId,
+        assetId: unknownAssetId,
+        status: "completed",
+        parameters: { threshold: 0.3, minSceneDuration: 0.5, maxScenes: 500 },
+        scenes: [{ id: "sc_01", index: 0, start: 0, end: 10.0, duration: 10.0, representativeTimestamp: 5.0, frameAvailable: true }],
+        sceneCount: 1,
+        videoDuration: 10.0,
+        createdAt: new Date(),
+        updatedAt: new Date()
+      });
+
+      const unknownScenesDoneManifest = (await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${unknownAssetId}/intelligence`)).json()).data;
+      assert(unknownScenesDoneManifest.modalities.scenes.status === "completed", "Scenes modality is completed");
+      assert(unknownScenesDoneManifest.overallStatus === "partial", "Overall status is partial, NEVER completed when audio availability is unknown");
+
+      // Clean up Step 5.5 test assets
+      await projectsCol.deleteOne({ _id: new ObjectId(intelProjId) });
+      await mediaAssetsCol.deleteMany({ projectId: intelProjId });
+      await audioExtractionsCol.deleteMany({ projectId: intelProjId });
+      await silenceDetectionsCol.deleteMany({ projectId: intelProjId });
+      await transcriptionsCol.deleteMany({ projectId: intelProjId });
+      await sceneDetectionsCol.deleteMany({ projectId: intelProjId });
+      try {
+        fs.rmSync(testJpegDir, { recursive: true, force: true });
+        if (fs.existsSync(intelMediaDiskPath)) fs.unlinkSync(intelMediaDiskPath);
+        if (fs.existsSync(unprobedDiskPath)) fs.unlinkSync(unprobedDiskPath);
+        const intelAssetDir = getAssetAnalysisDir(intelProjId, intelAssetId);
+        if (fs.existsSync(intelAssetDir)) fs.rmSync(intelAssetDir, { recursive: true, force: true });
+        const unknownAssetDir = getAssetAnalysisDir(intelProjId, unknownAssetId);
+        if (fs.existsSync(unknownAssetDir)) fs.rmSync(unknownAssetDir, { recursive: true, force: true });
+      } catch {}
+
+      // ----------------------------------------------------
       // 24. Project Deletion: Removes Timeline Metadata & Preserves Files
       // ----------------------------------------------------
       console.log("\n[Test 24] Project Deletion: Removes Timeline Metadata & Preserves Local Files");
+
       const assetDoc = await mediaAssetsCol.findOne({ projectId });
       assert(Boolean(assetDoc), "Asset document exists in MongoDB before deletion");
       const storedFileName = assetDoc?.storedFileName;
@@ -2928,7 +3454,6 @@ frame=    3 fps=0.0 q=-0.0 Lsize=N/A time=00:00:03.04 bitrate=N/A
       assert(transcriptionsBefore.length > 0, "Transcription metadata exists in MongoDB before project deletion");
 
       // Confirm scene detection metadata exists in DB before project deletion
-      const sceneDetectionsCol = getDB().collection("scene_detections");
       const sceneBefore = await sceneDetectionsCol.find({ projectId }).toArray();
       assert(sceneBefore.length > 0, "Scene detection metadata exists in MongoDB before project deletion");
 

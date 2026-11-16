@@ -17,6 +17,7 @@ import * as audioExtractionService from "../services/audio-extraction.service.js
 import * as silenceDetectionService from "../services/silence-detection.service.js";
 import * as transcriptionService from "../services/transcription.service.js";
 import * as sceneDetectionService from "../services/scene-detection.service.js";
+import * as mediaIntelligenceService from "../services/media-intelligence.service.js";
 import { resolveAssetAnalysisAudioPath } from "../config/storage.js";
 
 // Multer storage engine to save files directly into the project's media folder with a UUID
@@ -829,6 +830,111 @@ export async function getSceneFrameHandler(req: Request, res: Response): Promise
     if (!res.headersSent) {
       res.status(500).json({ error: "Failed to stream scene frame." });
     }
+  }
+}
+
+/**
+ * Step 5.5: Retrieves unified media intelligence manifest.
+ * Strictly read-only: performs zero database mutations.
+ */
+export async function getMediaIntelligenceHandler(req: Request, res: Response): Promise<void> {
+  const { projectId, assetId } = req.params;
+
+  if (
+    typeof projectId !== "string" ||
+    !ObjectId.isValid(projectId) ||
+    typeof assetId !== "string" ||
+    !ObjectId.isValid(assetId)
+  ) {
+    res.status(400).json({ error: "Invalid project ID or asset ID format." });
+    return;
+  }
+
+  const project = await projectService.getProjectById(projectId);
+  if (!project) {
+    res.status(404).json({ error: "Project not found." });
+    return;
+  }
+
+  const mediaAsset = await mediaService.getMediaAssetById(projectId, assetId);
+  if (!mediaAsset) {
+    res.status(404).json({ error: "Media asset not found in this project." });
+    return;
+  }
+
+  try {
+    const manifest = await mediaIntelligenceService.getMediaIntelligenceManifest(projectId, assetId);
+    if (!manifest) {
+      res.status(404).json({ error: "Media asset not found in this project." });
+      return;
+    }
+
+    res.status(200).json({ data: manifest });
+  } catch (err: unknown) {
+    console.error("[MediaController] getMediaIntelligence error:", err);
+    res.status(500).json({ error: "Failed to retrieve media intelligence manifest." });
+  }
+}
+
+/**
+ * Step 5.5: Retrieves sliced timeline intelligence within a bounded time window.
+ * Strictly read-only: performs zero database mutations.
+ */
+export async function getMediaIntelligenceTimelineHandler(req: Request, res: Response): Promise<void> {
+  const { projectId, assetId } = req.params;
+
+  if (
+    typeof projectId !== "string" ||
+    !ObjectId.isValid(projectId) ||
+    typeof assetId !== "string" ||
+    !ObjectId.isValid(assetId)
+  ) {
+    res.status(400).json({ error: "Invalid project ID or asset ID format." });
+    return;
+  }
+
+  const project = await projectService.getProjectById(projectId);
+  if (!project) {
+    res.status(404).json({ error: "Project not found." });
+    return;
+  }
+
+  const mediaAsset = await mediaService.getMediaAssetById(projectId, assetId);
+  if (!mediaAsset) {
+    res.status(404).json({ error: "Media asset not found in this project." });
+    return;
+  }
+
+  // Parse query options
+  const startParam = req.query.start !== undefined ? Number(req.query.start) : undefined;
+  const endParam = req.query.end !== undefined ? Number(req.query.end) : undefined;
+  const includeParam = typeof req.query.include === "string" ? req.query.include : undefined;
+
+  try {
+    const timeline = await mediaIntelligenceService.getMediaIntelligenceTimeline(projectId, assetId, {
+      start: startParam,
+      end: endParam,
+      include: includeParam
+    });
+
+    res.status(200).json({ data: timeline });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Failed to retrieve media intelligence timeline.";
+    if (
+      message.startsWith("Invalid time range:") ||
+      message.startsWith("Requested timeline window exceeds") ||
+      message.startsWith("Timeline query produced more than") ||
+      message.startsWith("Invalid include parameter.")
+    ) {
+      res.status(400).json({ error: message });
+      return;
+    }
+    if (message.includes("not found")) {
+      res.status(404).json({ error: message });
+      return;
+    }
+    console.error("[MediaController] getMediaIntelligenceTimeline error:", err);
+    res.status(500).json({ error: "Failed to retrieve media intelligence timeline." });
   }
 }
 

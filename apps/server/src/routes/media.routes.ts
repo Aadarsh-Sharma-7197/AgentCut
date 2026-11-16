@@ -17,7 +17,9 @@ import {
   requestSceneDetectionHandler,
   getSceneDetectionHandler,
   cancelSceneDetectionHandler,
-  getSceneFrameHandler
+  getSceneFrameHandler,
+  getMediaIntelligenceHandler,
+  getMediaIntelligenceTimelineHandler
 } from "../controllers/media.controller.js";
 
 export const mediaRouter = Router({ mergeParams: true });
@@ -73,3 +75,7 @@ mediaRouter.get("/:assetId/scenes/analyses/:analysisId", getSceneDetectionHandle
 mediaRouter.post("/:assetId/scenes/cancel", cancelSceneDetectionHandler);
 mediaRouter.get("/:assetId/scenes/analyses/:analysisId/frames/:sceneId", getSceneFrameHandler);
 mediaRouter.get("/:assetId/scenes/frames/:sceneId", getSceneFrameHandler);
+
+// Unified Media Intelligence routes (Step 5.5)
+mediaRouter.get("/:assetId/intelligence", getMediaIntelligenceHandler);
+mediaRouter.get("/:assetId/intelligence/timeline", getMediaIntelligenceTimelineHandler);
