@@ -32,6 +32,7 @@ import {
   type Timeline,
   type MediaAsset
 } from "./index.js";
+import { runRenderTests } from "./test-render.js";
 
 function runTimelineTests() {
   console.log("=== AgentCut Timeline Data Model Test Suite ===");
@@ -1384,8 +1385,10 @@ function runTimelineTests() {
   const pbSnap2 = getTimelinePlaybackSnapshot(reorderedPlaybackTl, 2.0);
   assert(pbSnap2.activeClip?.clip.id === "clip_B", "After moving Video B to index 0, Video B takes topmost playback priority");
 
-
-
+  // [Test 20] Render Plan Generation and Validation (Step 4.1)
+  const renderRes = runRenderTests();
+  passed += renderRes.passed;
+  failed += renderRes.failed;
 
   console.log(`\n=== Timeline Test Results: ${passed} passed, ${failed} failed ===`);
   if (failed > 0) {

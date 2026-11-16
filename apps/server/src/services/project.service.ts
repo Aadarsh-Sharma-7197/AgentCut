@@ -3,6 +3,7 @@ import { getDB } from "../config/db.js";
 import { ProjectDocument, toProjectDTO } from "../models/project.model.js";
 import { deleteMediaAssetsByProject } from "./media.service.js";
 import { deleteTimelineByProject } from "./timeline.service.js";
+import { deleteRenderJobsByProject } from "./render-job.service.js";
 import type { Project } from "@agentcut/shared";
 
 const COLLECTION_NAME = "projects";
@@ -51,19 +52,27 @@ export async function getProjectById(id: string): Promise<Project | null> {
 
 /**
  * Deletes a project.
- * POLICY ENFORCEMENT: Deletion removes ONLY the MongoDB project, associated media, and timeline metadata records.
+ * POLICY ENFORCEMENT: Deletion removes ONLY the MongoDB project, associated media, timeline, and render-job metadata records.
  * It NEVER deletes original media files, directories, user files, or performs filesystem cleanup.
  */
 export async function deleteProject(id: string): Promise<boolean> {
   const collection = getCollection();
   const result = await collection.deleteOne({ _id: new ObjectId(id) });
   if (result.deletedCount === 1) {
-    // Remove associated media asset metadata from MongoDB, leaving disk untouched
-    await deleteMediaAssetsByProject(id);
-    // Remove associated timeline metadata from MongoDB, leaving disk untouched
-    await deleteTimelineByProject(id);
+    try {
+      // Cascading metadata cleanup in parallel across all associated collections
+      await Promise.all([
+        deleteMediaAssetsByProject(id),
+        deleteTimelineByProject(id),
+        deleteRenderJobsByProject(id)
+      ]);
+    } catch (err) {
+      console.error(`[ProjectService] Warning: Sub-collection cleanup failed after deleting project '${id}':`, err);
+      throw err;
+    }
     return true;
   }
   return false;
 }
+
 

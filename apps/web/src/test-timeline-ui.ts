@@ -46,6 +46,13 @@ import {
   type MediaAsset
 } from "@agentcut/shared";
 import { fetchProjectTimeline, saveProjectTimeline } from "./api/timeline.js";
+import {
+  validateRenderPlanApi,
+  createRenderJobApi,
+  getRenderJobApi,
+  listRenderJobsApi,
+  cancelRenderJobApi
+} from "./api/render.js";
 import { TimelineSaveQueue } from "./utils/timelineSaveQueue.js";
 
 console.log("=== AgentCut Timeline UI & Interactive Operations Verification Suite ===\n");
@@ -2716,6 +2723,71 @@ async function runAllTests() {
     assert.strictEqual(cleanFinalBaseline!.tracks.length, 1);
     assert.strictEqual(cleanFinalBaseline!.tracks[0].clips.length, 1);
     console.log("  ✓ 6. Track deletion safety strictly verified and clean baseline restored to MongoDB");
+    passed++;
+
+    // 25. Step 4.1: Render Plan & Rendering Job Foundation Verification
+    console.log("\n[Suite 25] Step 4.1: Render Plan & Rendering Job Foundation Verification");
+
+    // 1. Validate render plan for real project
+    const realRenderPlanRes = await validateRenderPlanApi(realProjectId);
+    assert(realRenderPlanRes.validation.valid === true, "Render plan validation passes for real project");
+    assert.strictEqual(realRenderPlanRes.plan.projectId, realProjectId);
+    assert.strictEqual(realRenderPlanRes.plan.duration, 30.0);
+    assert.strictEqual(realRenderPlanRes.plan.settings.width, 1920);
+    assert.strictEqual(realRenderPlanRes.plan.settings.height, 1080);
+    assert.strictEqual(realRenderPlanRes.plan.settings.frameRate, 60);
+    assert.strictEqual(realRenderPlanRes.plan.videoClips.length, 1);
+    assert.strictEqual(realRenderPlanRes.plan.output.format, "mp4");
+    console.log("  ✓ 1. Validated render plan derived from real project timeline");
+    passed++;
+
+    // 2. Dry-run validation rejection of invalid timeline
+    const oddDimensionTl: Timeline = {
+      ...cleanFinalBaseline!,
+      settings: { ...cleanFinalBaseline!.settings, width: 1921 }
+    };
+    const invalidValidationRes = await validateRenderPlanApi(realProjectId, oddDimensionTl);
+    assert.strictEqual(invalidValidationRes.validation.valid, false);
+    assert(invalidValidationRes.validation.errors.some((e) => e.includes("even number")));
+    console.log("  ✓ 2. Render plan dry-run validation rejects invalid odd dimensions");
+    passed++;
+
+    // 3. Enqueue a new render job for the real project
+    const createdJob = await createRenderJobApi(realProjectId);
+    assert(Boolean(createdJob.id), "Render job created with valid job ID");
+    assert.strictEqual(createdJob.status, "queued");
+    assert.strictEqual(createdJob.progress, 0);
+    assert.strictEqual(createdJob.projectId, realProjectId);
+    assert.strictEqual(createdJob.plan.duration, 30.0);
+    console.log("  ✓ 3. Render job successfully enqueued in 'queued' status with progress 0");
+    passed++;
+
+    // 4. Retrieve render job by ID
+    const retrievedJob = await getRenderJobApi(realProjectId, createdJob.id);
+    assert.strictEqual(retrievedJob.id, createdJob.id);
+    assert.strictEqual(retrievedJob.status, "queued");
+    console.log("  ✓ 4. Render job retrieved by ID matches created job");
+    passed++;
+
+    // 5. List render jobs for real project
+    const projectJobs = await listRenderJobsApi(realProjectId);
+    assert(projectJobs.length > 0);
+    assert(projectJobs.some((j) => j.id === createdJob.id));
+    console.log("  ✓ 5. Created render job appears in list of project jobs");
+    passed++;
+
+    // 6. Cancel the queued render job
+    const canceledJob = await cancelRenderJobApi(realProjectId, createdJob.id);
+    assert.strictEqual(canceledJob.status, "canceled");
+    console.log("  ✓ 6. Render job transitioned cleanly to 'canceled' status");
+    passed++;
+
+    // 7. Verify physical video file on disk remains read-only and intact
+    const diskMediaDir25 = path.join(os.homedir(), ".agentcut", "projects", realProjectId, "media");
+    const diskMediaFiles25 = fs.readdirSync(diskMediaDir25);
+    const dStat25 = fs.statSync(path.join(diskMediaDir25, diskMediaFiles25[0]));
+    assert.strictEqual(dStat25.size, 630675104, "Original physical media file remains completely untouched");
+    console.log("  ✓ 7. CRITICAL SAFETY: Physical video file intact on disk (630675104 bytes)");
     passed++;
   } catch (err) {
     console.error("  ✗ FAIL: Live Vite dev server / proxy test failed:", err);

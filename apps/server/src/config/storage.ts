@@ -58,3 +58,33 @@ export function resolveStoredFilePath(projectId: string, storedFileName: string)
   return resolved;
 }
 
+export function getProjectExportDir(projectId: string): string {
+  const root = getDataDir();
+  const projectExportDir = path.join(root, "projects", projectId, "exports");
+
+  // Prevent path traversal on projectId
+  const resolved = path.resolve(projectExportDir);
+  const expectedPrefix = path.resolve(root, "projects");
+  if (!resolved.startsWith(expectedPrefix)) {
+    throw new Error("Invalid project ID path.");
+  }
+
+  if (!fs.existsSync(resolved)) {
+    fs.mkdirSync(resolved, { recursive: true });
+  }
+
+  return resolved;
+}
+
+export function resolveExportFilePath(projectId: string, fileName: string): string {
+  const exportDir = getProjectExportDir(projectId);
+  const resolved = path.resolve(exportDir, fileName);
+
+  // Path traversal defense
+  if (!resolved.startsWith(exportDir + path.sep) && resolved !== exportDir) {
+    throw new Error("Invalid export file path: path traversal detected.");
+  }
+
+  return resolved;
+}
+

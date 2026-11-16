@@ -7,6 +7,7 @@ import {
 } from "../controllers/project.controller.js";
 import { mediaRouter } from "./media.routes.js";
 import { timelineRouter } from "./timeline.routes.js";
+import { renderRouter } from "./render.routes.js";
 
 export const projectRouter = Router();
 
@@ -20,4 +21,7 @@ projectRouter.use("/:projectId/media", mediaRouter);
 
 // Mount timeline persistence routes under /api/projects/:projectId/timeline
 projectRouter.use("/:projectId/timeline", timelineRouter);
+
+// Mount rendering routes under /api/projects/:projectId/render
+projectRouter.use("/:projectId/render", renderRouter);
 

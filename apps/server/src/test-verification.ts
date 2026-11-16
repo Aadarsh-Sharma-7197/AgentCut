@@ -11,8 +11,10 @@ dotenv.config({ path: path.resolve(process.cwd(), "apps/server/.env") });
 
 const { default: app } = await import("./index.js");
 import { connectDB, closeDB, getDB } from "./config/db.js";
-import { getProjectMediaDir, resolveStoredFilePath } from "./config/storage.js";
+import { getProjectMediaDir, resolveStoredFilePath, getProjectExportDir, resolveExportFilePath } from "./config/storage.js";
 import { getFFprobePath } from "./utils/ffprobe.js";
+import { getFFmpegPath, checkFFmpegAvailable, validateFFmpegSafety } from "./utils/ffmpeg.js";
+import { ObjectId } from "mongodb";
 import type { Server } from "http";
 
 async function runTests() {
@@ -665,6 +667,332 @@ async function runTests() {
       assert(timelineCount === 1, "Exactly one timeline document exists for project in MongoDB Atlas");
 
       // ----------------------------------------------------
+      // 25. Render Plan Generation & Dry-Run Validation API
+      // ----------------------------------------------------
+      console.log("\n[Test 25] Render Plan Generation & Dry-Run Validation API");
+      const planRes = await fetch(`${baseUrl}/api/projects/${projectId}/render/plan`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({})
+      });
+      assert(planRes.status === 200, "POST /api/projects/:id/render/plan returns 200 OK");
+      const planJson = (await planRes.json()) as any;
+      assert(planJson.data?.plan?.projectId === projectId, "Render plan belongs to target project");
+      assert(planJson.data?.plan?.videoClips?.length > 0, "Render plan contains video clips");
+      assert(planJson.data?.validation?.valid === true, "Render plan is validated successfully");
+      assert(planJson.data?.plan?.output?.format === "mp4", "Output format defaults to mp4");
+      assert(planJson.data?.plan?.settings?.width === 1920, "Settings width matches timeline settings");
+      assert(!JSON.stringify(planJson).includes(os.homedir()), "API response strictly hides internal filesystem paths");
+
+      // Verify rejection of multi-track video compositing when 2 enabled video tracks overlap
+      const multiVideoOverlapTl = {
+        id: "tl_multi_v",
+        projectId,
+        tracks: [
+          {
+            id: "tr_v1",
+            name: "Video 1",
+            type: "video",
+            index: 0,
+            enabled: true,
+            clips: [
+              {
+                id: "cl_v1",
+                assetId: validAssetId,
+                trackId: "tr_v1",
+                sourceStart: 0,
+                sourceEnd: 0.8,
+                timelineStart: 0
+              }
+            ]
+          },
+          {
+            id: "tr_v2",
+            name: "Video 2",
+            type: "video",
+            index: 1,
+            enabled: true,
+            clips: [
+              {
+                id: "cl_v2",
+                assetId: validAssetId,
+                trackId: "tr_v2",
+                sourceStart: 0,
+                sourceEnd: 0.8,
+                timelineStart: 0.3 // Overlaps [0, 0.8]
+              }
+            ]
+          }
+        ],
+        settings: { frameRate: 30, width: 1920, height: 1080 },
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+      const multiVRes = await fetch(`${baseUrl}/api/projects/${projectId}/render/plan`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ timeline: multiVideoOverlapTl })
+      });
+      const multiVJson = (await multiVRes.json()) as any;
+      assert(multiVJson.data?.validation?.valid === false, "Overlapping multi-track video is rejected");
+      assert(
+        multiVJson.data?.validation?.errors?.some((e: string) => e.includes("Multi-track video compositing is not yet supported")),
+        "Rejection error explicitly specifies unsupported multi-track video compositing"
+      );
+
+      // Verify disabled overlapping video track is excluded and passes validation
+      const multiVDisabledTl = {
+        ...multiVideoOverlapTl,
+        tracks: [
+          multiVideoOverlapTl.tracks[0],
+          { ...multiVideoOverlapTl.tracks[1], enabled: false }
+        ]
+      };
+      const multiVDisRes = await fetch(`${baseUrl}/api/projects/${projectId}/render/plan`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ timeline: multiVDisabledTl })
+      });
+      const multiVDisJson = (await multiVDisRes.json()) as any;
+      assert(multiVDisJson.data?.validation?.valid === true, "Disabled overlapping video track is excluded and passes");
+
+      // ----------------------------------------------------
+      // 26. Reject Render Plan with Nonexistent Media Asset Reference
+      // ----------------------------------------------------
+      console.log("\n[Test 26] Reject Render Plan with Nonexistent Media Asset Reference");
+      const fakeAssetTimeline = {
+        id: "tl_fake",
+        projectId,
+        tracks: [
+          {
+            id: "tr_fake",
+            name: "Video 1",
+            type: "video",
+            index: 0,
+            enabled: true,
+            clips: [
+              {
+                id: "cl_fake",
+                assetId: new ObjectId().toHexString(),
+                trackId: "tr_fake",
+                sourceStart: 0,
+                sourceEnd: 5,
+                timelineStart: 0
+              }
+            ]
+          }
+        ],
+        settings: { frameRate: 30, width: 1920, height: 1080 },
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+      const badAssetRes = await fetch(`${baseUrl}/api/projects/${projectId}/render/plan`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ timeline: fakeAssetTimeline })
+      });
+      assert(badAssetRes.status === 200, "POST /api/projects/:id/render/plan returns 200 with diagnostics");
+      const badAssetJson = (await badAssetRes.json()) as any;
+      assert(badAssetJson.data?.validation?.valid === false, "Validation reports valid: false for missing asset");
+      assert(
+        badAssetJson.data?.validation?.errors?.some((e: string) => e.includes("does not exist in project")),
+        "Error message explicitly identifies missing asset in project"
+      );
+
+      // ----------------------------------------------------
+      // 27. Reject Cross-Project Asset Hijacking in Render Plan
+      // ----------------------------------------------------
+      console.log("\n[Test 27] Reject Cross-Project Asset Hijacking in Render Plan");
+      const crossProjectTimeline = {
+        id: "tl_cross",
+        projectId,
+        tracks: [
+          {
+            id: "tr_cross",
+            name: "Video 1",
+            type: "video",
+            index: 0,
+            enabled: true,
+            clips: [
+              {
+                id: "cl_cross",
+                assetId: validAssetId, // Belongs to projectId
+                trackId: "tr_cross",
+                sourceStart: 0,
+                sourceEnd: 5,
+                timelineStart: 0
+              }
+            ]
+          }
+        ],
+        settings: { frameRate: 30, width: 1920, height: 1080 },
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+      // Attempt to validate this timeline under project2Id (which does not own validAssetId)
+      const crossRenderRes = await fetch(`${baseUrl}/api/projects/${project2Id}/render/plan`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ timeline: { ...crossProjectTimeline, projectId: project2Id } })
+      });
+      assert(crossRenderRes.status === 200, "Cross-project check returns 200 with validation diagnosis");
+      const crossRenderJson = (await crossRenderRes.json()) as any;
+      assert(crossRenderJson.data?.validation?.valid === false, "Cross-project asset reference is rejected");
+      assert(
+        crossRenderJson.data?.validation?.errors?.some((e: string) => e.includes("belongs to another project") || e.includes("does not exist in project")),
+        "Diagnostic error identifies cross-project media violation"
+      );
+
+      // ----------------------------------------------------
+      // 28. Reject Missing Physical Media File on Disk
+      // ----------------------------------------------------
+      console.log("\n[Test 28] Reject Missing Physical Media File on Disk");
+      const mediaAssetsCol28 = getDB().collection("media_assets");
+      const ghostAssetId = new ObjectId();
+      await mediaAssetsCol28.insertOne({
+        _id: ghostAssetId,
+        projectId,
+        originalName: "ghost.mp4",
+        storedFileName: "nonexistent_ghost_file.mp4",
+        fileSize: 1024,
+        mimeType: "video/mp4",
+        duration: 10.0,
+        width: 1920,
+        height: 1080,
+        frameRate: "30",
+        videoCodec: "h264",
+        audioCodec: "aac",
+        format: "mov,mp4,m4a,3gp,3g2,mj2",
+        createdAt: new Date()
+      });
+      const ghostTimeline = {
+        id: "tl_ghost",
+        projectId,
+        tracks: [
+          {
+            id: "tr_ghost",
+            name: "Video",
+            type: "video",
+            index: 0,
+            enabled: true,
+            clips: [
+              {
+                id: "cl_ghost",
+                assetId: ghostAssetId.toHexString(),
+                trackId: "tr_ghost",
+                sourceStart: 0,
+                sourceEnd: 5,
+                timelineStart: 0
+              }
+            ]
+          }
+        ],
+        settings: { frameRate: 30, width: 1920, height: 1080 },
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+      const ghostRes = await fetch(`${baseUrl}/api/projects/${projectId}/render/plan`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ timeline: ghostTimeline })
+      });
+      const ghostJson = (await ghostRes.json()) as any;
+      assert(ghostJson.data?.validation?.valid === false, "Missing physical media file on disk rejected");
+      assert(
+        ghostJson.data?.validation?.errors?.some((e: string) => e.includes("missing on disk")),
+        "Error message explicitly identifies missing disk file"
+      );
+      // Clean up ghost asset doc
+      await mediaAssetsCol28.deleteOne({ _id: ghostAssetId });
+
+      // ----------------------------------------------------
+      // 29. Create Render Job & Enqueue State in MongoDB
+      // ----------------------------------------------------
+      console.log("\n[Test 29] Create Render Job & Enqueue State in MongoDB");
+      const createJobRes = await fetch(`${baseUrl}/api/projects/${projectId}/render/jobs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({})
+      });
+      assert(createJobRes.status === 201, "POST /api/projects/:id/render/jobs returns 201 Created");
+      const jobJson = (await createJobRes.json()) as any;
+      const createdJob = jobJson.data;
+      assert(Boolean(createdJob.id), "Render job has valid jobId");
+      assert(createdJob.status === "queued", "Initial render job status is strictly 'queued'");
+      assert(createdJob.progress === 0, "Initial render job progress is 0");
+      assert(createdJob.projectId === projectId, "Job belongs to correct project");
+      assert(createdJob.plan?.videoClips?.length > 0, "Job stores validated render plan");
+
+      // Verify job was persisted in MongoDB
+      const renderJobsCol = getDB().collection("render_jobs");
+      const jobInDb = await renderJobsCol.findOne({ jobId: createdJob.id });
+      assert(Boolean(jobInDb), "Render job document persisted durably in MongoDB Atlas");
+      assert(jobInDb?.status === "queued", "Persisted DB status is 'queued'");
+
+      // Verify retrieving single job via GET endpoint
+      const getJobRes = await fetch(`${baseUrl}/api/projects/${projectId}/render/jobs/${createdJob.id}`);
+      assert(getJobRes.status === 200, "GET /api/projects/:id/render/jobs/:jobId returns 200 OK");
+      const getJobJson = (await getJobRes.json()) as any;
+      assert(getJobJson.data?.id === createdJob.id, "Retrieved job ID matches created job");
+      assert(getJobJson.data?.status === "queued", "Retrieved job status is 'queued'");
+
+      // Verify listing jobs for project
+      const listJobsRes = await fetch(`${baseUrl}/api/projects/${projectId}/render/jobs`);
+      assert(listJobsRes.status === 200, "GET /api/projects/:id/render/jobs returns 200 OK");
+      const listJobsJson = (await listJobsRes.json()) as any;
+      assert(Array.isArray(listJobsJson.data), "List render jobs returns array");
+      assert(
+        listJobsJson.data.some((j: any) => j.id === createdJob.id),
+        "Created render job appears in project jobs list"
+      );
+
+      // Verify FFmpeg binary safety checks and export directory
+      const ffmpegPath = getFFmpegPath();
+      assert(Boolean(ffmpegPath), "getFFmpegPath returns configured or default path");
+
+      // Verify checkFFmpegAvailable handles invalid / missing paths cleanly without crashing
+      const missingBinAvailable = await checkFFmpegAvailable("C:\\nonexistent\\missing_fake_ffmpeg.exe");
+      assert(missingBinAvailable === false, "checkFFmpegAvailable cleanly returns false for missing binary");
+
+      // Verify validateFFmpegSafety blocks shell injection tokens
+      let injectionBlocked = false;
+      try {
+        validateFFmpegSafety(["-i", "input.mp4; rm -rf /", "-c:v", "copy"]);
+      } catch {
+        injectionBlocked = true;
+      }
+      assert(injectionBlocked === true, "validateFFmpegSafety detects and blocks shell control characters");
+
+      const exportDir = getProjectExportDir(projectId);
+      assert(fs.existsSync(exportDir), "AgentCut-managed export directory created safely");
+      const exportFilePath = resolveExportFilePath(projectId, "render_test.mp4");
+      assert(exportFilePath.startsWith(exportDir), "resolveExportFilePath strictly enforces directory boundaries");
+
+      // ----------------------------------------------------
+      // 30. Render Job Cancellation & Safety Boundaries
+      // ----------------------------------------------------
+      console.log("\n[Test 30] Render Job Cancellation & Safety Boundaries");
+      const cancelRes = await fetch(
+        `${baseUrl}/api/projects/${projectId}/render/jobs/${createdJob.id}/cancel`,
+        { method: "POST" }
+      );
+      assert(cancelRes.status === 200, "POST /api/projects/:id/render/jobs/:jobId/cancel returns 200 OK");
+      const cancelJson = (await cancelRes.json()) as any;
+      assert(cancelJson.data?.status === "canceled", "Canceled job status updated to 'canceled'");
+
+      // Verify DB reflects canceled status
+      const canceledInDb = await renderJobsCol.findOne({ jobId: createdJob.id });
+      assert(canceledInDb?.status === "canceled", "MongoDB record reflects 'canceled' status");
+
+      // Reject render job creation on project with no timeline
+      const noTlProjRes = await fetch(`${baseUrl}/api/projects/${project2Id}/render/jobs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({})
+      });
+      assert(noTlProjRes.status === 500 || noTlProjRes.status === 400, "Reject render job on project with no timeline");
+
+      // ----------------------------------------------------
       // 24. Project Deletion: Removes Timeline Metadata & Preserves Files
       // ----------------------------------------------------
       console.log("\n[Test 24] Project Deletion: Removes Timeline Metadata & Preserves Local Files");
@@ -678,6 +1006,34 @@ async function runTests() {
       // Confirm timeline document exists in DB before project deletion
       const tlDocBefore = await timelinesCol.findOne({ projectId });
       assert(Boolean(tlDocBefore), "Timeline metadata exists in MongoDB before deletion");
+
+      // Confirm render job metadata exists in DB before project deletion
+      const renderJobsBefore = await renderJobsCol.find({ projectId }).toArray();
+      assert(renderJobsBefore.length > 0, "Render job metadata exists in MongoDB before project deletion");
+
+      // Create a render job for project 2 to verify cross-project isolation during deletion
+      const otherProjectJobId = new ObjectId().toHexString();
+      await renderJobsCol.insertOne({
+        _id: new ObjectId(),
+        jobId: otherProjectJobId,
+        projectId: project2Id,
+        timelineId: "tl_proj2",
+        status: "queued",
+        progress: 0,
+        plan: {
+          projectId: project2Id,
+          timelineId: "tl_proj2",
+          settings: { width: 1920, height: 1080, frameRate: 30 },
+          duration: 10,
+          videoClips: [],
+          audioClips: [],
+          tracks: [],
+          output: { format: "mp4", videoCodec: "libx264", audioCodec: "aac", pixelFormat: "yuv420p" },
+          createdAt: new Date().toISOString()
+        },
+        createdAt: new Date(),
+        updatedAt: new Date()
+      });
 
       // Delete the project
       const deleteProjRes = await fetch(`${baseUrl}/api/projects/${projectId}`, {
@@ -697,14 +1053,25 @@ async function runTests() {
       const remainingTlDocs = await timelinesCol.find({ projectId }).toArray();
       assert(remainingTlDocs.length === 0, "Associated timeline metadata record removed from MongoDB");
 
+      // Check render job metadata deleted for deleted project
+      const remainingRenderJobDocs = await renderJobsCol.find({ projectId }).toArray();
+      assert(remainingRenderJobDocs.length === 0, "Associated render job metadata records removed from MongoDB upon project deletion");
+
+      // Check render job metadata belonging to project 2 remains intact
+      const otherJobStillExists = await renderJobsCol.findOne({ jobId: otherProjectJobId });
+      assert(Boolean(otherJobStillExists), "Render jobs belonging to another project remain completely intact in MongoDB");
+
       // POLICY VERIFICATION: The physical media file on disk must STILL exist!
       assert(
         fs.existsSync(filePathOnDisk),
         "CRITICAL POLICY: Physical media file on disk is PRESERVED after project deletion"
       );
 
-      // Clean up project 2
+      // Clean up project 2 (which should also cascade-delete its render job)
       await fetch(`${baseUrl}/api/projects/${project2Id}`, { method: "DELETE" });
+      const postCleanProj2Jobs = await renderJobsCol.find({ projectId: project2Id }).toArray();
+      assert(postCleanProj2Jobs.length === 0, "Deleting project 2 removes its associated render jobs as well");
+
 
       // Clean up temporary disk files
       try {
