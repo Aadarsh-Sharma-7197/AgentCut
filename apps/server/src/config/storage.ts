@@ -196,3 +196,68 @@ export function resolveAssetTranscriptTempPath(projectId: string, assetId: strin
   return resolved;
 }
 
+export function getAssetScenesDir(projectId: string, assetId: string): string {
+  const assetDir = getAssetAnalysisDir(projectId, assetId);
+  const scenesDir = path.join(assetDir, "scenes");
+  const resolved = path.resolve(scenesDir);
+
+  if (!resolved.startsWith(assetDir + path.sep)) {
+    throw new Error("Invalid scenes dir path: path traversal detected.");
+  }
+
+  if (!fs.existsSync(resolved)) {
+    fs.mkdirSync(resolved, { recursive: true });
+  }
+
+  return resolved;
+}
+
+export function getSceneAnalysisDir(projectId: string, assetId: string, analysisId: string): string {
+  const scenesDir = getAssetScenesDir(projectId, assetId);
+  const analysisDir = path.join(scenesDir, analysisId);
+  const resolved = path.resolve(analysisDir);
+
+  if (!resolved.startsWith(scenesDir + path.sep)) {
+    throw new Error("Invalid scene analysis dir path: path traversal detected.");
+  }
+
+  if (!fs.existsSync(resolved)) {
+    fs.mkdirSync(resolved, { recursive: true });
+  }
+
+  return resolved;
+}
+
+export function resolveSceneFramePath(
+  projectId: string,
+  assetId: string,
+  analysisId: string,
+  sceneId: string
+): string {
+  const analysisDir = getSceneAnalysisDir(projectId, assetId, analysisId);
+  const resolved = path.resolve(analysisDir, `${sceneId}.jpg`);
+
+  if (!resolved.startsWith(analysisDir + path.sep)) {
+    throw new Error("Invalid scene frame path: path traversal detected.");
+  }
+
+  return resolved;
+}
+
+export function resolveSceneFrameTempPath(
+  projectId: string,
+  assetId: string,
+  analysisId: string,
+  sceneId: string,
+  jobId: string
+): string {
+  const analysisDir = getSceneAnalysisDir(projectId, assetId, analysisId);
+  const resolved = path.resolve(analysisDir, `${sceneId}.${jobId}.tmp.jpg`);
+
+  if (!resolved.startsWith(analysisDir + path.sep)) {
+    throw new Error("Invalid temp scene frame path: path traversal detected.");
+  }
+
+  return resolved;
+}
+

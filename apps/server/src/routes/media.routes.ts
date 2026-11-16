@@ -13,7 +13,11 @@ import {
   getSilenceDetectionHandler,
   requestTranscriptionHandler,
   getTranscriptionHandler,
-  cancelTranscriptionHandler
+  cancelTranscriptionHandler,
+  requestSceneDetectionHandler,
+  getSceneDetectionHandler,
+  cancelSceneDetectionHandler,
+  getSceneFrameHandler
 } from "../controllers/media.controller.js";
 
 export const mediaRouter = Router({ mergeParams: true });
@@ -59,3 +63,13 @@ mediaRouter.get("/:assetId/transcription", getTranscriptionHandler);
 mediaRouter.get("/:assetId/transcription/:transcriptionId", getTranscriptionHandler);
 mediaRouter.post("/:assetId/transcription/cancel", cancelTranscriptionHandler);
 mediaRouter.post("/:assetId/transcription/:transcriptionId/cancel", cancelTranscriptionHandler);
+
+// Scene detection routes
+mediaRouter.post("/:assetId/scenes", requestSceneDetectionHandler);
+mediaRouter.post("/:assetId/scenes/detect", requestSceneDetectionHandler);
+mediaRouter.post("/:assetId/detect-scenes", requestSceneDetectionHandler);
+mediaRouter.get("/:assetId/scenes", getSceneDetectionHandler);
+mediaRouter.get("/:assetId/scenes/analyses/:analysisId", getSceneDetectionHandler);
+mediaRouter.post("/:assetId/scenes/cancel", cancelSceneDetectionHandler);
+mediaRouter.get("/:assetId/scenes/analyses/:analysisId/frames/:sceneId", getSceneFrameHandler);
+mediaRouter.get("/:assetId/scenes/frames/:sceneId", getSceneFrameHandler);

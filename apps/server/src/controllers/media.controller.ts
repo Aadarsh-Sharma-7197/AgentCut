@@ -16,6 +16,7 @@ import * as mediaService from "../services/media.service.js";
 import * as audioExtractionService from "../services/audio-extraction.service.js";
 import * as silenceDetectionService from "../services/silence-detection.service.js";
 import * as transcriptionService from "../services/transcription.service.js";
+import * as sceneDetectionService from "../services/scene-detection.service.js";
 import { resolveAssetAnalysisAudioPath } from "../config/storage.js";
 
 // Multer storage engine to save files directly into the project's media folder with a UUID
@@ -633,6 +634,201 @@ export async function cancelTranscriptionHandler(req: Request, res: Response): P
   } catch (err: unknown) {
     console.error("[MediaController] cancelTranscription error:", err);
     res.status(500).json({ error: "Failed to cancel transcription." });
+  }
+}
+
+/**
+ * Handles requesting scene detection for an imported video asset.
+ */
+export async function requestSceneDetectionHandler(req: Request, res: Response): Promise<void> {
+  const { projectId, assetId } = req.params;
+
+  if (
+    typeof projectId !== "string" ||
+    !ObjectId.isValid(projectId) ||
+    typeof assetId !== "string" ||
+    !ObjectId.isValid(assetId)
+  ) {
+    res.status(400).json({ error: "Invalid project ID or asset ID format." });
+    return;
+  }
+
+  const project = await projectService.getProjectById(projectId);
+  if (!project) {
+    res.status(404).json({ error: "Project not found." });
+    return;
+  }
+
+  const mediaAsset = await mediaService.getMediaAssetById(projectId, assetId);
+  if (!mediaAsset) {
+    res.status(404).json({ error: "Media asset not found in this project." });
+    return;
+  }
+
+  try {
+    const body = req.body || {};
+    const query = req.query || {};
+
+    const rawParams = {
+      threshold: body.threshold !== undefined ? body.threshold : query.threshold,
+      minSceneDuration: body.minSceneDuration !== undefined ? body.minSceneDuration : query.minSceneDuration,
+      maxScenes: body.maxScenes !== undefined ? body.maxScenes : query.maxScenes
+    };
+
+    const result = await sceneDetectionService.requestSceneDetection(projectId, assetId, rawParams);
+    res.status(200).json({ data: result });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : "Failed to execute scene detection.";
+    if (msg.includes("must be") || msg.includes("Invalid") || msg.includes("does not contain")) {
+      res.status(400).json({ error: msg });
+      return;
+    }
+    if (msg.includes("not found")) {
+      res.status(404).json({ error: msg });
+      return;
+    }
+    console.error("[MediaController] requestSceneDetection error:", err);
+    res.status(500).json({ error: msg });
+  }
+}
+
+/**
+ * Retrieves scene detection for an asset.
+ */
+export async function getSceneDetectionHandler(req: Request, res: Response): Promise<void> {
+  const { projectId, assetId } = req.params;
+  const rawAnalysisId = req.params.analysisId || req.query.analysisId;
+  const analysisId = typeof rawAnalysisId === "string" ? rawAnalysisId : undefined;
+
+  if (
+    typeof projectId !== "string" ||
+    !ObjectId.isValid(projectId) ||
+    typeof assetId !== "string" ||
+    !ObjectId.isValid(assetId) ||
+    (analysisId !== undefined && !ObjectId.isValid(analysisId))
+  ) {
+    res.status(400).json({ error: "Invalid project ID, asset ID, or analysis ID format." });
+    return;
+  }
+
+  try {
+    const result = await sceneDetectionService.getSceneDetection(projectId, assetId, analysisId);
+    if (!result) {
+      res.status(404).json({ error: "Scene detection not found for this media asset." });
+      return;
+    }
+
+    res.status(200).json({ data: result });
+  } catch (err: unknown) {
+    console.error("[MediaController] getSceneDetection error:", err);
+    res.status(500).json({ error: "Failed to retrieve scene detection." });
+  }
+}
+
+/**
+ * Cancels an active scene detection run.
+ */
+export async function cancelSceneDetectionHandler(req: Request, res: Response): Promise<void> {
+  const { projectId, assetId } = req.params;
+
+  if (
+    typeof projectId !== "string" ||
+    !ObjectId.isValid(projectId) ||
+    typeof assetId !== "string" ||
+    !ObjectId.isValid(assetId)
+  ) {
+    res.status(400).json({ error: "Invalid project ID or asset ID format." });
+    return;
+  }
+
+  const project = await projectService.getProjectById(projectId);
+  if (!project) {
+    res.status(404).json({ error: "Project not found." });
+    return;
+  }
+
+  const mediaAsset = await mediaService.getMediaAssetById(projectId, assetId);
+  if (!mediaAsset) {
+    res.status(404).json({ error: "Media asset not found in this project." });
+    return;
+  }
+
+  try {
+    const canceled = await sceneDetectionService.cancelActiveSceneDetection(projectId, assetId);
+    if (!canceled) {
+      res.status(404).json({ error: "No active scene detection found to cancel." });
+      return;
+    }
+
+    res.status(200).json({ message: "Scene detection canceled successfully." });
+  } catch (err: unknown) {
+    console.error("[MediaController] cancelSceneDetection error:", err);
+    res.status(500).json({ error: "Failed to cancel scene detection." });
+  }
+}
+
+/**
+ * Streams a representative frame image with private immutable caching and strong ETag.
+ */
+export async function getSceneFrameHandler(req: Request, res: Response): Promise<void> {
+  const { projectId, assetId, sceneId } = req.params;
+  const rawAnalysisId = req.params.analysisId;
+  let analysisId = typeof rawAnalysisId === "string" ? rawAnalysisId : undefined;
+
+  if (
+    typeof projectId !== "string" ||
+    !ObjectId.isValid(projectId) ||
+    typeof assetId !== "string" ||
+    !ObjectId.isValid(assetId) ||
+    typeof sceneId !== "string" ||
+    !/^[a-zA-Z0-9_-]+$/.test(sceneId)
+  ) {
+    res.status(400).json({ error: "Invalid project ID, asset ID, or scene ID format." });
+    return;
+  }
+
+  // If analysisId is not provided directly in URL (convenience alias route), find the latest completed analysis
+  if (!analysisId) {
+    const latest = await sceneDetectionService.getSceneDetection(projectId, assetId);
+    if (!latest || latest.status !== "completed") {
+      res.status(404).json({ error: "No completed scene detection found for this asset." });
+      return;
+    }
+    analysisId = latest.id;
+  }
+
+  if (typeof analysisId !== "string" || !ObjectId.isValid(analysisId)) {
+    res.status(400).json({ error: "Invalid analysis ID format." });
+    return;
+  }
+
+  try {
+    const frame = await sceneDetectionService.getSceneFrame(projectId, assetId, analysisId, sceneId);
+    if (!frame) {
+      res.status(404).json({ error: "Scene frame not found." });
+      return;
+    }
+
+    // HTTP Caching: check If-None-Match header
+    const ifNoneMatch = req.headers["if-none-match"];
+    if (ifNoneMatch && (ifNoneMatch === frame.etag || ifNoneMatch === `W/${frame.etag}`)) {
+      res.status(304).end();
+      return;
+    }
+
+    res.writeHead(200, {
+      "Content-Type": "image/jpeg",
+      "Content-Length": frame.fileSize,
+      "Cache-Control": "private, max-age=86400, immutable",
+      "ETag": frame.etag
+    });
+
+    fs.createReadStream(frame.filePath).pipe(res);
+  } catch (err: unknown) {
+    console.error("[MediaController] getSceneFrame error:", err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Failed to stream scene frame." });
+    }
   }
 }
 

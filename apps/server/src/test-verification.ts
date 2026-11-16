@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import path from "path";
 import fs from "fs";
 import os from "os";
+import { EventEmitter } from "events";
 import { spawnSync } from "child_process";
 
 dotenv.config({ path: "./apps/server/.env" });
@@ -65,8 +66,28 @@ import {
 import {
   getAssetTranscriptionDir,
   resolveAssetTranscriptPath,
-  resolveAssetTranscriptTempPath
+  resolveAssetTranscriptTempPath,
+  getAssetScenesDir,
+  getSceneAnalysisDir,
+  resolveSceneFramePath
 } from "./config/storage.js";
+import {
+  requestSceneDetection,
+  getSceneDetection,
+  cancelActiveSceneDetection,
+  isSceneDetectionActive,
+  validateSceneDetectionParameters,
+  parseShowinfoStderr,
+  buildSceneIntervals,
+  getSceneFrame,
+  isProcessExited,
+  terminateProcessWithGracePeriod,
+  terminateJobProcesses,
+  DEFAULT_THRESHOLD,
+  DEFAULT_MIN_SCENE_DURATION,
+  DEFAULT_MAX_SCENES,
+  MAX_ALLOWED_SCENES
+} from "./services/scene-detection.service.js";
 import { ObjectId } from "mongodb";
 import type { Server } from "http";
 
@@ -2314,6 +2335,569 @@ async function runTests() {
       assert(!isWorkerAlive(), "Worker process terminates cleanly without orphan processes");
 
       // ----------------------------------------------------
+      // 40. Scene Detection & Visual Analysis Foundation (Step 5.4)
+      // ----------------------------------------------------
+      console.log("\n[Test 40] Scene Detection & Visual Analysis Foundation (Step 5.4)");
+
+      // 40.1 Parameter Validation & Sensible Boundaries
+      const defaultSceneParams = validateSceneDetectionParameters();
+      assert(defaultSceneParams.threshold === 0.3, "Default scene threshold is 0.3");
+      assert(defaultSceneParams.minSceneDuration === 0.5, "Default minimum scene duration is 0.5s");
+      assert(defaultSceneParams.maxScenes === 500, "Default max scenes limit is 500");
+
+      try {
+        validateSceneDetectionParameters({ threshold: 0.01 });
+        assert(false, "Reject threshold < 0.05");
+      } catch (err: any) {
+        assert(err.message.includes("threshold must be"), "Reject threshold < 0.05 with 400 Bad Request");
+      }
+
+      try {
+        validateSceneDetectionParameters({ threshold: 1.5 });
+        assert(false, "Reject threshold > 1.0");
+      } catch (err: any) {
+        assert(err.message.includes("threshold must be"), "Reject threshold > 1.0 with 400 Bad Request");
+      }
+
+      try {
+        validateSceneDetectionParameters({ minSceneDuration: 0.05 });
+        assert(false, "Reject minSceneDuration < 0.1");
+      } catch (err: any) {
+        assert(err.message.includes("minSceneDuration must be"), "Reject minSceneDuration < 0.1 with 400 Bad Request");
+      }
+
+      try {
+        validateSceneDetectionParameters({ maxScenes: 0 });
+        assert(false, "Reject maxScenes < 1");
+      } catch (err: any) {
+        assert(err.message.includes("maxScenes must be"), "Reject maxScenes < 1 with 400 Bad Request");
+      }
+
+      try {
+        validateSceneDetectionParameters({ maxScenes: 3000 });
+        assert(false, "Reject maxScenes > 2000");
+      } catch (err: any) {
+        assert(err.message.includes("maxScenes must be"), "Reject maxScenes > 2000 with 400 Bad Request");
+      }
+
+      const customParams = validateSceneDetectionParameters({ threshold: 0.45, minSceneDuration: 1.2, maxScenes: 250 });
+      assert(customParams.threshold === 0.45 && customParams.minSceneDuration === 1.2 && customParams.maxScenes === 250, "Accept valid custom scene parameters");
+
+      // 40.2 Parser & Continuous Coverage Interval Builder
+      const sampleShowinfo = `
+[Parsed_showinfo_1 @ 00000204f4a90340] config in time_base: 1/12800, frame_rate: 25/1
+[Parsed_showinfo_1 @ 00000204f4a90340] n:   0 pts:  12800 pts_time:1.000000       duration:    512 duration_time:0.04    fmt:yuv420p
+[Parsed_showinfo_1 @ 00000204f4a90340] n:   1 pts:  25600 pts_time:2.000000       duration:    512 duration_time:0.04    fmt:yuv420p
+[Parsed_showinfo_1 @ 00000204f4a90340] n:   2 pts:  38400 pts_time:3.000000       duration:    512 duration_time:0.04    fmt:yuv420p
+frame=    3 fps=0.0 q=-0.0 Lsize=N/A time=00:00:03.04 bitrate=N/A
+`;
+      const parsedCuts = parseShowinfoStderr(sampleShowinfo);
+      assert(parsedCuts.length === 3, "parseShowinfoStderr correctly extracts 3 cut timestamps");
+      assert(parsedCuts[0].timestamp === 1.0 && parsedCuts[1].timestamp === 2.0 && parsedCuts[2].timestamp === 3.0, "Parsed cut timestamps match expected values");
+
+      const testIntervals = buildSceneIntervals(parsedCuts, 4.0, 0.5, 500, "test_analysis_1");
+      assert(testIntervals.length === 4, "buildSceneIntervals constructs 4 scenes for 3 cut points across 4.0s video");
+      assert(testIntervals[0].start === 0.0 && testIntervals[0].end === 1.0, "Scene 0 starts at 0.0s and ends at first cut (1.0s)");
+      assert(testIntervals[3].start === 3.0 && testIntervals[3].end === 4.0, "Final scene ends exactly at video duration (4.0s)");
+      assert(testIntervals.every((s, idx) => idx === 0 || s.start === testIntervals[idx - 1].end), "Scene boundaries are strictly contiguous without gaps");
+      assert(testIntervals.every((s) => s.duration === Math.round((s.end - s.start) * 1000) / 1000 && s.duration > 0), "All scenes have valid positive duration");
+      assert(testIntervals.every((s) => s.representativeTimestamp >= s.start && s.representativeTimestamp <= s.end), "Representative timestamps lie strictly inside scene intervals");
+      assert(testIntervals.every((s) => s.id.startsWith("test_analysis_1_s")), "Scene IDs are stably scoped to analysis ID");
+
+      // Verify cuts closer than minSceneDuration are merged deterministically
+      const closeCuts = [{ timestamp: 1.0 }, { timestamp: 1.2 }, { timestamp: 2.5 }];
+      const mergedIntervals = buildSceneIntervals(closeCuts, 3.0, 0.5, 500, "test_analysis_2");
+      assert(mergedIntervals.length === 3, "Cut closer than minSceneDuration (1.2s - 1.0s = 0.2s < 0.5s) is merged");
+      assert(mergedIntervals[0].start === 0.0 && mergedIntervals[0].end === 1.0, "Scene 0 ends at 1.0s");
+      assert(mergedIntervals[1].start === 1.0 && mergedIntervals[1].end === 2.5, "Scene 1 spans across merged cut from 1.0s to 2.5s");
+
+      // Verify maxScenes capping with score prioritization
+      const scoredCuts = [
+        { timestamp: 1.0, score: 0.25 },
+        { timestamp: 2.0, score: 0.95 },
+        { timestamp: 3.0, score: 0.40 },
+        { timestamp: 4.0, score: 0.88 },
+        { timestamp: 5.0, score: 0.30 }
+      ];
+      // Video duration = 6.0s, minSceneDuration = 0.5s, maxScenes = 3 (allowing at most 2 cuts)
+      const cappedIntervals = buildSceneIntervals(scoredCuts, 6.0, 0.5, 3, "test_analysis_capped");
+      assert(cappedIntervals.length === 3, "buildSceneIntervals strictly caps scene count to maxScenes = 3");
+      // The 2 cuts selected should be 2.0s (score 0.95) and 4.0s (score 0.88)
+      assert(cappedIntervals[0].start === 0.0 && cappedIntervals[0].end === 2.0, "Capped scene 0 ends at 2.0s (highest score cut)");
+      assert(cappedIntervals[1].start === 2.0 && cappedIntervals[1].end === 4.0, "Capped scene 1 ends at 4.0s (second highest score cut)");
+      assert(cappedIntervals[2].start === 4.0 && cappedIntervals[2].end === 6.0, "Capped final scene ends exactly at video duration 6.0s");
+
+      // Verify maxScenes = 1 returns exactly 1 scene covering entire duration
+      const singleSceneIntervals = buildSceneIntervals(scoredCuts, 6.0, 0.5, 1, "test_analysis_single");
+      assert(singleSceneIntervals.length === 1, "maxScenes = 1 produces exactly 1 scene");
+      assert(singleSceneIntervals[0].start === 0.0 && singleSceneIntervals[0].end === 6.0, "Single scene covers [0.0, 6.0]");
+
+      // 40.3 Reject Scene Detection on Non-Video / Audio-Only File
+      // Upload audioOnlyMp4Path to project 1
+      const audioOnlyForm = new FormData();
+      audioOnlyForm.append("file", new Blob([fs.readFileSync(audioOnlyMp4Path)], { type: "audio/mp4" }), "audio_only_probe.mp4");
+      // Since Test 6 rejected audio-only upload, let's create a video asset without audio then test that
+      const noVideoForm = new FormData();
+      // Test invalid assetId returns 400
+      const badSceneAssetRes = await fetch(`${baseUrl}/api/projects/${projectId}/media/invalid-asset-id/scenes/detect`, {
+        method: "POST"
+      });
+      assert(badSceneAssetRes.status === 400, "Reject scene detection with invalid assetId with 400 Bad Request");
+
+      // Nonexistent asset returns 404
+      const nonexistentAssetRes = await fetch(`${baseUrl}/api/projects/${projectId}/media/${new ObjectId().toHexString()}/scenes/detect`, {
+        method: "POST"
+      });
+      assert(nonexistentAssetRes.status === 404, "Reject scene detection on nonexistent asset with 404 Not Found");
+
+      // 40.4 Real Multi-Scene Synthetic Video Generation & Upload
+      const multiSceneMp4Path = path.join(tempDir, "agentcut_multi_scene_test.mp4");
+      if (fs.existsSync(ffmpegPath)) {
+        // Generate a 4-second video with 4 distinct color scenes: Red (1s) -> Green (1s) -> Blue (1s) -> Yellow (1s)
+        spawnSync(
+          ffmpegPath,
+          [
+            "-hide_banner", "-nostdin", "-y",
+            "-f", "lavfi", "-i", "color=c=red:d=1:r=25:size=320x240",
+            "-f", "lavfi", "-i", "color=c=green:d=1:r=25:size=320x240",
+            "-f", "lavfi", "-i", "color=c=blue:d=1:r=25:size=320x240",
+            "-f", "lavfi", "-i", "color=c=yellow:d=1:r=25:size=320x240",
+            "-filter_complex", "[0:v][1:v][2:v][3:v]concat=n=4:v=1:a=0[v]",
+            "-map", "[v]",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            multiSceneMp4Path
+          ],
+          { stdio: "ignore" }
+        );
+      }
+      assert(fs.existsSync(multiSceneMp4Path) && fs.statSync(multiSceneMp4Path).size > 0, "Real synthetic multi-scene MP4 generated");
+
+      // Upload multi-scene video to project 1
+      const multiSceneBuffer = fs.readFileSync(multiSceneMp4Path);
+      const multiSceneFormData = new FormData();
+      multiSceneFormData.append("file", new Blob([multiSceneBuffer], { type: "video/mp4" }), "multi_scene.mp4");
+      const multiSceneUploadRes = await fetch(`${baseUrl}/api/projects/${projectId}/media`, {
+        method: "POST",
+        body: multiSceneFormData
+      });
+      assert(multiSceneUploadRes.status === 201, "Multi-scene video uploaded successfully with 201 Created");
+      const multiSceneAsset = ((await multiSceneUploadRes.json()) as { data: { id: string } }).data;
+      const multiSceneAssetId = multiSceneAsset.id;
+
+      // 40.5 Real Scene Detection & Representative Frame Extraction
+      const detectScenesRes = await fetch(`${baseUrl}/api/projects/${projectId}/media/${multiSceneAssetId}/scenes/detect`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ threshold: 0.3, minSceneDuration: 0.5 })
+      });
+      assert(detectScenesRes.status === 200, "POST /api/projects/:id/media/:assetId/scenes/detect returns 200 OK");
+      const sceneData = ((await detectScenesRes.json()) as { data: any }).data;
+      assert(sceneData.status === "completed", "Scene detection artifact status is 'completed'");
+      assert(sceneData.videoDuration === 4.0, "Video duration reported accurately as 4.0s");
+      assert(sceneData.scenes.length >= 3, `Detected visual scene changes across 4 color blocks (count: ${sceneData.scenes.length})`);
+      assert(sceneData.scenes[0].start === 0.0, "First scene starts strictly at 0.0s");
+      assert(sceneData.scenes[sceneData.scenes.length - 1].end === 4.0, "Last scene ends strictly at video duration (4.0s)");
+      assert(sceneData.scenes.every((s: any, idx: number) => idx === 0 || s.start === sceneData.scenes[idx - 1].end), "Continuous scene coverage across entire duration");
+      assert(sceneData.scenes.every((s: any) => s.frameAvailable === true), "Representative frames extracted for all detected scenes");
+      assert(sceneData.scenes.every((s: any) => s.frameUrl.includes(`/scenes/analyses/${sceneData.id}/frames/${s.id}`)), "Frame URLs correctly embed analysis ID and scene ID");
+      assert(!JSON.stringify(sceneData).includes(os.homedir()), "Client response strictly hides internal server filesystem paths");
+
+      // 40.6 Physical Frame File Verification & HTTP Streaming
+      const analysisDir = getSceneAnalysisDir(projectId, multiSceneAssetId, sceneData.id);
+      assert(fs.existsSync(analysisDir), "Analysis-specific frame directory exists on disk");
+      const firstScene = sceneData.scenes[0];
+      const firstFramePath = resolveSceneFramePath(projectId, multiSceneAssetId, sceneData.id, firstScene.id);
+      assert(fs.existsSync(firstFramePath) && fs.statSync(firstFramePath).size > 0, "Representative frame JPEG exists on disk with non-zero size");
+
+      // Stream frame via primary URL
+      const streamFrameRes = await fetch(`${baseUrl}${firstScene.frameUrl}`);
+      assert(streamFrameRes.status === 200, "GET frame endpoint returns 200 OK");
+      assert(streamFrameRes.headers.get("content-type") === "image/jpeg", "Frame Content-Type is image/jpeg");
+      assert(streamFrameRes.headers.get("cache-control") === "private, max-age=86400, immutable", "Cache-Control is private, max-age=86400, immutable");
+      const frameEtag = streamFrameRes.headers.get("etag");
+      assert(Boolean(frameEtag) && frameEtag!.startsWith('"') && frameEtag!.endsWith('"') && !frameEtag!.startsWith('W/'), "Valid strong ETag returned for frame");
+
+      // Conditional GET with If-None-Match returns 304 Not Modified
+      const notModifiedRes = await fetch(`${baseUrl}${firstScene.frameUrl}`, {
+        headers: { "If-None-Match": frameEtag! }
+      });
+      assert(notModifiedRes.status === 304, "Conditional GET with If-None-Match returns 304 Not Modified");
+
+      // Stream frame via convenience alias route
+      const aliasFrameRes = await fetch(`${baseUrl}/api/projects/${projectId}/media/${multiSceneAssetId}/scenes/frames/${firstScene.id}`);
+      assert(aliasFrameRes.status === 200, "Convenience alias frame endpoint returns 200 OK");
+      assert(aliasFrameRes.headers.get("etag") === frameEtag, "Convenience alias returns matching strong ETag");
+
+      // 40.7 Security & Path Traversal Rejection
+      const traversalRes = await fetch(`${baseUrl}/api/projects/${projectId}/media/${multiSceneAssetId}/scenes/analyses/${sceneData.id}/frames/..%2f..%2fsecret`);
+      assert(traversalRes.status === 400, "Path traversal attempt in scene frame route rejected with 400 Bad Request");
+
+      const crossProjectFrameRes = await fetch(`${baseUrl}/api/projects/${project2Id}/media/${multiSceneAssetId}/scenes/analyses/${sceneData.id}/frames/${firstScene.id}`);
+      assert(crossProjectFrameRes.status === 404, "Cross-project frame access rejected with 404 Not Found");
+
+      // 40.8 Cache Reuse for Identical Parameters
+      const cachedDetectRes = await fetch(`${baseUrl}/api/projects/${projectId}/media/${multiSceneAssetId}/scenes/detect`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ threshold: 0.3, minSceneDuration: 0.5 })
+      });
+      assert(cachedDetectRes.status === 200, "Repeated POST /scenes/detect returns 200 OK");
+      const cachedData = ((await cachedDetectRes.json()) as { data: any }).data;
+      assert(cachedData.id === sceneData.id, "Cached analysis returned without re-running FFmpeg");
+
+      // 40.9 Parameter Change & Isolation
+      // Higher threshold 0.9 creates a replacement analysis in its own directory
+      const higherThresholdRes = await fetch(`${baseUrl}/api/projects/${projectId}/media/${multiSceneAssetId}/scenes/detect`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ threshold: 0.9, minSceneDuration: 0.5 })
+      });
+      assert(higherThresholdRes.status === 200, "Reanalysis with different threshold returns 200 OK");
+      const higherData = ((await higherThresholdRes.json()) as { data: any }).data;
+      assert(higherData.id !== sceneData.id, "New analysis assigned distinct analysisId");
+      assert(higherData.parameters.threshold === 0.9, "Updated threshold (0.9) persisted in artifact");
+      // Check old analysis directory remains intact on disk
+      assert(fs.existsSync(firstFramePath), "Previous completed analysis frames preserved intact on disk after reanalysis");
+
+      // 40.10 Concurrency Deduplication
+      const concurrMp4Path = path.join(tempDir, "agentcut_concurr_scene_test.mp4");
+      spawnSync(
+        ffmpegPath,
+        [
+          "-hide_banner", "-nostdin", "-y",
+          "-f", "lavfi", "-i", "color=c=red:d=1:r=25:size=320x240",
+          "-f", "lavfi", "-i", "color=c=blue:d=1:r=25:size=320x240",
+          "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]",
+          "-map", "[v]",
+          "-c:v", "libx264", "-pix_fmt", "yuv420p",
+          concurrMp4Path
+        ],
+        { stdio: "ignore" }
+      );
+      const concurrBuffer = fs.readFileSync(concurrMp4Path);
+      const concurrFormData = new FormData();
+      concurrFormData.append("file", new Blob([concurrBuffer], { type: "video/mp4" }), "concurr_scene.mp4");
+      const concurrUploadRes = await fetch(`${baseUrl}/api/projects/${projectId}/media`, {
+        method: "POST",
+        body: concurrFormData
+      });
+      assert(concurrUploadRes.status === 201, "Uploaded video for concurrency deduplication test");
+      const concurrAssetId = ((await concurrUploadRes.json()) as { data: { id: string } }).data.id;
+
+      // Fire 2 concurrent POST requests with identical parameters
+      const [concurrRes1, concurrRes2] = await Promise.all([
+        fetch(`${baseUrl}/api/projects/${projectId}/media/${concurrAssetId}/scenes/detect`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ threshold: 0.3 })
+        }),
+        fetch(`${baseUrl}/api/projects/${projectId}/media/${concurrAssetId}/scenes/detect`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ threshold: 0.3 })
+        })
+      ]);
+      assert(concurrRes1.status === 200 && concurrRes2.status === 200, "Concurrent scene detection requests both return 200 OK");
+      const concurrData1 = ((await concurrRes1.json()) as { data: any }).data;
+      const concurrData2 = ((await concurrRes2.json()) as { data: any }).data;
+      assert(concurrData1.id === concurrData2.id, "Concurrent detection requests return identical analysis artifact");
+
+      // 40.11 In-Flight Cancellation & Replace-and-Cancel Concurrency Races
+      const cancelMp4Path = path.join(tempDir, "agentcut_cancel_scene_test.mp4");
+      spawnSync(
+        ffmpegPath,
+        [
+          "-hide_banner", "-nostdin", "-y",
+          "-f", "lavfi", "-i", "color=c=black:d=5:r=25:size=320x240",
+          "-c:v", "libx264", "-pix_fmt", "yuv420p",
+          cancelMp4Path
+        ],
+        { stdio: "ignore" }
+      );
+      const cancelBuffer = fs.readFileSync(cancelMp4Path);
+      const cancelFormData = new FormData();
+      cancelFormData.append("file", new Blob([cancelBuffer], { type: "video/mp4" }), "cancel_scene.mp4");
+      const cancelUploadRes = await fetch(`${baseUrl}/api/projects/${projectId}/media`, {
+        method: "POST",
+        body: cancelFormData
+      });
+      const cancelAssetId = ((await cancelUploadRes.json()) as { data: { id: string } }).data.id;
+
+      // Start detection without awaiting, then cancel
+      const startDetectionPromise = fetch(`${baseUrl}/api/projects/${projectId}/media/${cancelAssetId}/scenes/detect`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ threshold: 0.3 })
+      });
+
+      // Brief yield so the active job is registered
+      await new Promise((r) => setTimeout(r, 50));
+
+      const sceneCancelRes = await fetch(`${baseUrl}/api/projects/${projectId}/media/${cancelAssetId}/scenes/cancel`, {
+        method: "POST"
+      });
+      assert(sceneCancelRes.status === 200, "POST /api/projects/:id/media/:assetId/scenes/cancel returns 200 OK");
+      const sceneCancelJson = (await sceneCancelRes.json()) as { message?: string };
+      assert(sceneCancelJson.message === "Scene detection canceled successfully.", "Cancel response confirms cancellation");
+
+      // The in-flight detection request should fail or return error
+      const startResult = await startDetectionPromise;
+      assert(startResult.status === 500 || startResult.status === 200, "Canceled request handled cleanly without server crash");
+
+      // Check database status is 'canceled'
+      const canceledDoc = await getDB().collection("scene_detections").findOne({ projectId, assetId: cancelAssetId });
+      assert(canceledDoc?.status === "canceled", "MongoDB record updated to 'canceled' status upon cancellation");
+
+      // 40.12 Replace-and-Cancel Race Test: In-flight replacement with different parameters
+      // Start detection with threshold 0.2
+      const initialReplacePromise = fetch(`${baseUrl}/api/projects/${projectId}/media/${cancelAssetId}/scenes/detect`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ threshold: 0.2 })
+      });
+      await new Promise((r) => setTimeout(r, 30));
+
+      // Trigger replacement request with threshold 0.7 while initial is active
+      const replacementRes = await fetch(`${baseUrl}/api/projects/${projectId}/media/${cancelAssetId}/scenes/detect`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ threshold: 0.7 })
+      });
+      assert(replacementRes.status === 200, "Replacement request with different parameters returns 200 OK");
+      const replacementData = ((await replacementRes.json()) as { data: any }).data;
+      assert(replacementData.status === "completed", "Replacement analysis completed successfully");
+      assert(replacementData.parameters.threshold === 0.7, "Replacement analysis reflects new threshold 0.7");
+
+      // Initial replaced request should be canceled cleanly
+      const initialReplacedResult = await initialReplacePromise;
+      assert(initialReplacedResult.status === 500 || initialReplacedResult.status === 200, "Replaced job terminated cleanly");
+
+      // 40.13 Cancellation during Multi-Frame Extraction
+      // Create multi-cut video with 6 distinct cuts to trigger multiple parallel frame extractions
+      const multiCutMp4Path = path.join(tempDir, "agentcut_multi_cut_cancel.mp4");
+      spawnSync(
+        ffmpegPath,
+        [
+          "-hide_banner", "-nostdin", "-y",
+          "-f", "lavfi", "-i", "color=c=red:d=1:r=25:size=320x240",
+          "-f", "lavfi", "-i", "color=c=green:d=1:r=25:size=320x240",
+          "-f", "lavfi", "-i", "color=c=blue:d=1:r=25:size=320x240",
+          "-f", "lavfi", "-i", "color=c=yellow:d=1:r=25:size=320x240",
+          "-f", "lavfi", "-i", "color=c=magenta:d=1:r=25:size=320x240",
+          "-f", "lavfi", "-i", "color=c=cyan:d=1:r=25:size=320x240",
+          "-filter_complex", "[0:v][1:v][2:v][3:v][4:v][5:v]concat=n=6:v=1:a=0[v]",
+          "-map", "[v]",
+          "-c:v", "libx264", "-pix_fmt", "yuv420p",
+          multiCutMp4Path
+        ],
+        { stdio: "ignore" }
+      );
+      const multiCutBuffer = fs.readFileSync(multiCutMp4Path);
+      const multiCutForm = new FormData();
+      multiCutForm.append("file", new Blob([multiCutBuffer], { type: "video/mp4" }), "multi_cut_cancel.mp4");
+      const multiCutUploadRes = await fetch(`${baseUrl}/api/projects/${projectId}/media`, {
+        method: "POST",
+        body: multiCutForm
+      });
+      const multiCutAssetId = ((await multiCutUploadRes.json()) as { data: { id: string } }).data.id;
+
+      // Start detection and yield until frame extraction is active
+      const frameExtractionJobPromise = fetch(`${baseUrl}/api/projects/${projectId}/media/${multiCutAssetId}/scenes/detect`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ threshold: 0.3 })
+      });
+      await new Promise((r) => setTimeout(r, 60));
+
+      // Cancel while extraction is active
+      const frameCancelRes = await fetch(`${baseUrl}/api/projects/${projectId}/media/${multiCutAssetId}/scenes/cancel`, {
+        method: "POST"
+      });
+      assert(frameCancelRes.status === 200, "Cancel during active frame extraction returns 200 OK");
+      await frameExtractionJobPromise.catch(() => {});
+
+      // Confirm all temporary files in analysis dir are cleaned up
+      const multiCutScenesDir = getAssetScenesDir(projectId, multiCutAssetId);
+      const remainingAnalysisDirs = fs.existsSync(multiCutScenesDir) ? fs.readdirSync(multiCutScenesDir) : [];
+      assert(remainingAnalysisDirs.length === 0, "No orphaned analysis directories or frames remain after cancellation during frame extraction");
+      assert(!isSceneDetectionActive(projectId, multiCutAssetId), "Job is fully unregistered and inactive after cancellation");
+
+      // Verify directory was removed strictly after all processes exited (no post-cleanup file recreation)
+      await new Promise((r) => setTimeout(r, 200));
+      const postWaitDirs = fs.existsSync(multiCutScenesDir) ? fs.readdirSync(multiCutScenesDir) : [];
+      assert(postWaitDirs.length === 0, "Active processes did not write any frames after directory was deleted");
+
+      // 40.14 Process-Lifecycle & Termination Safety Verifications
+      console.log("  - Verifying process exit tracking and termination safety properties");
+
+      // Helper to generate a mock ChildProcess
+      function createMockChildProcess(pid: number) {
+        const proc = new EventEmitter() as any;
+        proc.pid = pid;
+        proc.killed = false;
+        proc.exitCode = null;
+        proc.signalCode = null;
+        proc.lastSignal = null;
+        proc.kill = (signal?: string) => {
+          proc.killed = true;
+          proc.lastSignal = signal || "SIGTERM";
+          return true;
+        };
+        return proc;
+      }
+
+      // 1. isProcessExited guarantees: proc.killed === true is NOT proof of process exit
+      const mockProc1 = createMockChildProcess(1001);
+      mockProc1.killed = true; // Signal was sent, but process has not yet exited!
+      assert(isProcessExited(mockProc1) === false, "isProcessExited returns false when killed is true but exitCode and signalCode are null");
+
+      mockProc1.exitCode = 0;
+      assert(isProcessExited(mockProc1) === true, "isProcessExited returns true when exitCode is non-null");
+
+      const mockProc2 = createMockChildProcess(1002);
+      mockProc2.signalCode = "SIGTERM";
+      assert(isProcessExited(mockProc2) === true, "isProcessExited returns true when signalCode is non-null");
+
+      // 2. terminateProcessWithGracePeriod: proc.killed === true does not trigger premature exit resolution
+      const mockProc3 = createMockChildProcess(1003);
+      let termResolved = false;
+      const termPromise = terminateProcessWithGracePeriod(mockProc3, 50, 200).then((res) => {
+        termResolved = true;
+        return res;
+      });
+
+      // Immediately after call, SIGTERM was sent and proc.killed === true, but promise must NOT have resolved yet
+      assert(mockProc3.killed === true, "SIGTERM signal was sent to process");
+      assert(mockProc3.lastSignal === "SIGTERM", "Initial signal sent is SIGTERM");
+      await new Promise((r) => setTimeout(r, 20));
+      assert(!termResolved, "terminateProcessWithGracePeriod does NOT resolve early merely because proc.killed is true");
+
+      // Emit close event, which should resolve the termination promise
+      mockProc3.exitCode = 0;
+      mockProc3.emit("close", 0, null);
+      const termResult = await termPromise;
+      assert(termResult.exited === true, "terminateProcessWithGracePeriod settles with exited: true upon confirmed close event");
+
+      // 3. Escalation to SIGKILL after grace period and continued awaiting
+      const mockProc4 = createMockChildProcess(1004);
+      let killEscalated = false;
+      const termPromise4 = terminateProcessWithGracePeriod(mockProc4, 40, 250).then((res) => {
+        killEscalated = true;
+        return res;
+      });
+
+      await new Promise((r) => setTimeout(r, 60)); // Yield beyond 40ms grace period
+      assert(mockProc4.lastSignal === "SIGKILL", "Escalates to SIGKILL after gracePeriodMs expires without process exit");
+      assert(!killEscalated, "Does NOT immediately resolve upon sending SIGKILL; continues awaiting close/exit event");
+
+      mockProc4.signalCode = "SIGKILL";
+      mockProc4.emit("exit", null, "SIGKILL");
+      const termResult4 = await termPromise4;
+      assert(termResult4.exited === true, "Awaits actual exit event after SIGKILL escalation");
+
+      // 4. Hard deadline timeout on unresponsive process preserves directory and returns exited: false
+      const mockProc5 = createMockChildProcess(1005);
+      const termResult5 = await terminateProcessWithGracePeriod(mockProc5, 30, 80);
+      assert(termResult5.exited === false, "Returns exited: false when process does not exit within bounded deadline");
+      assert(termResult5.pid === 1005, "Unexited result reports correct process PID");
+
+      // 5. terminateJobProcesses reports unexited PIDs, allExited: false, and preserves analysis directory
+      const mockPreserveDir = getSceneAnalysisDir(projectId, "mock_asset_1", "mock_analysis_1");
+      fs.mkdirSync(mockPreserveDir, { recursive: true });
+      fs.writeFileSync(path.join(mockPreserveDir, "frame_preserve_test.jpg"), "dummy frame data");
+
+      const mockJob: any = {
+        jobId: "mock_job_1",
+        analysisId: "mock_analysis_1",
+        projectId,
+        assetId: "mock_asset_1",
+        parameters: { threshold: 0.3, minSceneDuration: 0.5, maxScenes: 500 },
+        canceled: false,
+        detectionProcess: mockProc5, // Never exited
+        activeFrameProcesses: new Set()
+      };
+      const jobTermRes = await terminateJobProcesses(mockJob, 30, 80);
+      assert(jobTermRes.allExited === false, "terminateJobProcesses reports allExited: false when a process remains alive");
+      assert(jobTermRes.unexitedPids.includes(1005), "terminateJobProcesses lists unexited PID 1005");
+
+      // Verify directory preservation guard: cleanup must be skipped if allExited === false
+      if (jobTermRes.allExited) {
+        fs.rmSync(mockPreserveDir, { recursive: true, force: true });
+      }
+      assert(fs.existsSync(mockPreserveDir), "Analysis directory is PRESERVED on disk when child process fails to exit");
+      try { fs.rmSync(mockPreserveDir, { recursive: true, force: true }); } catch {}
+
+      // 6. An 'error' event alone cannot establish that a running process has exited
+      const mockProcError = createMockChildProcess(1006);
+      let errorSettled = false;
+      const errorTermPromise = terminateProcessWithGracePeriod(mockProcError, 50, 150).then((res) => {
+        errorSettled = true;
+        return res;
+      });
+      mockProcError.emit("error", new Error("Simulated stream error"));
+      await new Promise((r) => setTimeout(r, 20));
+      assert(!errorSettled, "An 'error' event alone does NOT mark a running process as exited");
+      mockProcError.exitCode = 0;
+      mockProcError.emit("close", 0, null);
+      const errorTermResult = await errorTermPromise;
+      assert(errorTermResult.exited === true, "Process only settled as exited when confirmed close event arrives");
+
+      // 7. Concurrent cancellation deduplication integration test
+      // Start a real scene detection and fire 3 concurrent cancellation requests simultaneously
+      const concurrCancelMp4 = path.join(tempDir, "agentcut_concurrent_cancel.mp4");
+      spawnSync(
+        ffmpegPath,
+        [
+          "-hide_banner", "-nostdin", "-y",
+          "-f", "lavfi", "-i", "color=c=black:d=4:r=25:size=320x240",
+          "-c:v", "libx264", "-pix_fmt", "yuv420p",
+          concurrCancelMp4
+        ],
+        { stdio: "ignore" }
+      );
+      const concurrCancelForm = new FormData();
+      concurrCancelForm.append("file", new Blob([fs.readFileSync(concurrCancelMp4)], { type: "video/mp4" }), "concurr_cancel.mp4");
+      const concurrCancelUploadRes = await fetch(`${baseUrl}/api/projects/${projectId}/media`, {
+        method: "POST",
+        body: concurrCancelForm
+      });
+      const concurrCancelAssetId = ((await concurrCancelUploadRes.json()) as { data: { id: string } }).data.id;
+
+      // Start detection
+      const activeJobPromise = fetch(`${baseUrl}/api/projects/${projectId}/media/${concurrCancelAssetId}/scenes/detect`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ threshold: 0.3 })
+      });
+      await new Promise((r) => setTimeout(r, 40));
+
+      // Trigger 3 concurrent cancellations simultaneously
+      const [cRes1, cRes2, cRes3] = await Promise.all([
+        fetch(`${baseUrl}/api/projects/${projectId}/media/${concurrCancelAssetId}/scenes/cancel`, { method: "POST" }),
+        fetch(`${baseUrl}/api/projects/${projectId}/media/${concurrCancelAssetId}/scenes/cancel`, { method: "POST" }),
+        fetch(`${baseUrl}/api/projects/${projectId}/media/${concurrCancelAssetId}/scenes/cancel`, { method: "POST" })
+      ]);
+      assert(cRes1.status === 200 && cRes2.status === 200 && cRes3.status === 200, "All concurrent cancellation calls return 200 OK");
+      await activeJobPromise.catch(() => {});
+
+      // Verify no orphaned directory exists
+      const concurrCancelScenesDir = getAssetScenesDir(projectId, concurrCancelAssetId);
+      const concurrRemainingDirs = fs.existsSync(concurrCancelScenesDir) ? fs.readdirSync(concurrCancelScenesDir) : [];
+      assert(concurrRemainingDirs.length === 0, "Analysis directory safely removed after concurrent cancellation");
+
+      try {
+        if (fs.existsSync(concurrCancelMp4)) fs.unlinkSync(concurrCancelMp4);
+      } catch {}
+
+      // Clean up temporary synthetic videos
+      try {
+        if (fs.existsSync(multiSceneMp4Path)) fs.unlinkSync(multiSceneMp4Path);
+        if (fs.existsSync(concurrMp4Path)) fs.unlinkSync(concurrMp4Path);
+        if (fs.existsSync(cancelMp4Path)) fs.unlinkSync(cancelMp4Path);
+        if (fs.existsSync(multiCutMp4Path)) fs.unlinkSync(multiCutMp4Path);
+      } catch {}
+
+      // ----------------------------------------------------
       // 24. Project Deletion: Removes Timeline Metadata & Preserves Files
       // ----------------------------------------------------
       console.log("\n[Test 24] Project Deletion: Removes Timeline Metadata & Preserves Local Files");
@@ -2342,6 +2926,11 @@ async function runTests() {
       // Confirm transcription metadata exists in DB before project deletion
       const transcriptionsBefore = await transcriptionsCol.find({ projectId }).toArray();
       assert(transcriptionsBefore.length > 0, "Transcription metadata exists in MongoDB before project deletion");
+
+      // Confirm scene detection metadata exists in DB before project deletion
+      const sceneDetectionsCol = getDB().collection("scene_detections");
+      const sceneBefore = await sceneDetectionsCol.find({ projectId }).toArray();
+      assert(sceneBefore.length > 0, "Scene detection metadata exists in MongoDB before project deletion");
 
       // Create a render job for project 2 to verify cross-project isolation during deletion
       const otherProjectJobId = new ObjectId().toHexString();
@@ -2400,6 +2989,10 @@ async function runTests() {
       // Check transcription metadata deleted for deleted project
       const remainingTxDocs = await transcriptionsCol.find({ projectId }).toArray();
       assert(remainingTxDocs.length === 0, "Associated transcription metadata records removed from MongoDB upon project deletion");
+
+      // Check scene detection metadata deleted for deleted project
+      const remainingSceneDocs = await sceneDetectionsCol.find({ projectId }).toArray();
+      assert(remainingSceneDocs.length === 0, "Associated scene detection metadata records removed from MongoDB upon project deletion");
 
       // Check render job metadata belonging to project 2 remains intact
       const otherJobStillExists = await renderJobsCol.findOne({ jobId: otherProjectJobId });

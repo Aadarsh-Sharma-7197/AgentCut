@@ -108,3 +108,38 @@ export interface TranscriptionWithTranscript extends TranscriptionArtifact {
   transcript?: TranscriptData;
 }
 
+export type SceneDetectionStatus = "detecting" | "completed" | "failed" | "canceled";
+
+export interface Scene {
+  id: string; // e.g. `${analysisId}_s${index}`
+  index: number;
+  start: number; // in seconds, rounded to 3 decimal places
+  end: number; // in seconds, rounded to 3 decimal places
+  duration: number; // end - start, in seconds
+  representativeTimestamp: number; // midpoint timestamp in seconds
+  score?: number; // FFmpeg scene change score if available
+  frameAvailable: boolean;
+  frameUrl?: string; // relative API endpoint: /api/projects/:projectId/media/:assetId/scenes/analyses/:analysisId/frames/:sceneId
+}
+
+export interface SceneDetectionParameters {
+  threshold: number; // between 0.05 and 1.0 (default: 0.3)
+  minSceneDuration: number; // between 0.1 and 3600.0 (default: 0.5)
+  maxScenes: number; // between 1 and 2000 (default: 500)
+}
+
+export interface SceneDetectionArtifact {
+  id: string;
+  projectId: string;
+  assetId: string;
+  status: SceneDetectionStatus;
+  parameters: SceneDetectionParameters;
+  scenes: Scene[];
+  sceneCount: number;
+  videoDuration: number;
+  completedAt?: string;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+

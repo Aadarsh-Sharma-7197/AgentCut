@@ -7,6 +7,7 @@ import { deleteRenderJobsByProject } from "./render-job.service.js";
 import { deleteAudioExtractionsByProject } from "./audio-extraction.service.js";
 import { deleteSilenceDetectionsByProject } from "./silence-detection.service.js";
 import { deleteTranscriptionsByProject } from "./transcription.service.js";
+import { deleteSceneDetectionsByProject } from "./scene-detection.service.js";
 import type { Project } from "@agentcut/shared";
 
 const COLLECTION_NAME = "projects";
@@ -70,7 +71,8 @@ export async function deleteProject(id: string): Promise<boolean> {
         deleteRenderJobsByProject(id),
         deleteAudioExtractionsByProject(id),
         deleteSilenceDetectionsByProject(id),
-        deleteTranscriptionsByProject(id)
+        deleteTranscriptionsByProject(id),
+        deleteSceneDetectionsByProject(id)
       ]);
     } catch (err) {
       console.error(`[ProjectService] Warning: Sub-collection cleanup failed after deleting project '${id}':`, err);
