@@ -51,7 +51,8 @@ import {
   createRenderJobApi,
   getRenderJobApi,
   listRenderJobsApi,
-  cancelRenderJobApi
+  cancelRenderJobApi,
+  getRenderJobDownloadUrl
 } from "./api/render.js";
 import { TimelineSaveQueue } from "./utils/timelineSaveQueue.js";
 
@@ -2765,7 +2766,10 @@ async function runAllTests() {
     // 4. Retrieve render job by ID
     const retrievedJob = await getRenderJobApi(realProjectId, createdJob.id);
     assert.strictEqual(retrievedJob.id, createdJob.id);
-    assert.strictEqual(retrievedJob.status, "queued");
+    assert(
+      ["queued", "validating", "rendering"].includes(retrievedJob.status),
+      `Render job status is in active state (was: ${retrievedJob.status})`
+    );
     console.log("  ✓ 4. Render job retrieved by ID matches created job");
     passed++;
 
@@ -2788,6 +2792,62 @@ async function runAllTests() {
     const dStat25 = fs.statSync(path.join(diskMediaDir25, diskMediaFiles25[0]));
     assert.strictEqual(dStat25.size, 630675104, "Original physical media file remains completely untouched");
     console.log("  ✓ 7. CRITICAL SAFETY: Physical video file intact on disk (630675104 bytes)");
+    passed++;
+
+    // ----------------------------------------------------
+    // Suite 26: Step 4.2: MP4 Rendering Execution & Download Client Verification
+    // ----------------------------------------------------
+    console.log("\n[Suite 26] Step 4.2: MP4 Rendering Pipeline & Download Client Verification");
+
+    // 1. Download URL generation helper
+    const testDlUrl = getRenderJobDownloadUrl(realProjectId, "test_job_456");
+    assert(testDlUrl.includes(`/api/projects/${realProjectId}/render/jobs/test_job_456/download`));
+    console.log("  ✓ 1. getRenderJobDownloadUrl produces standard download URL path");
+    passed++;
+
+    // 2. Perform end-to-end rendering on real project through Vite dev proxy
+    console.log("  - Starting real MP4 render through client API client...");
+    const e2eJob = await createRenderJobApi(realProjectId);
+    assert.strictEqual(e2eJob.status, "queued");
+    assert.strictEqual(e2eJob.progress, 0);
+    console.log(`  ✓ 2. E2E render job enqueued (${e2eJob.id})`);
+    passed++;
+
+    // 3. Poll through client API until completed
+    let finalJob = e2eJob;
+    const clientPollStart = Date.now();
+    while (Date.now() - clientPollStart < 90000) {
+      await new Promise((r) => setTimeout(r, 600));
+      finalJob = await getRenderJobApi(realProjectId, e2eJob.id);
+      if (finalJob.status === "completed" || finalJob.status === "failed") {
+        break;
+      }
+    }
+
+    assert.strictEqual(finalJob.status, "completed", `E2E render completed successfully (was: ${finalJob.status})`);
+    assert.strictEqual(finalJob.progress, 100, "Completed job progress reaches 100%");
+    assert(Boolean(finalJob.outputMetadata?.outputFileName), "outputMetadata contains outputFileName");
+    console.log("  ✓ 3. Render job completed with 100% progress and output metadata");
+    passed++;
+
+    // 4. Verify download endpoint through Vite proxy / server
+    const downloadEndpointUrl = getRenderJobDownloadUrl(realProjectId, e2eJob.id);
+    const dlResponse = await fetch(downloadEndpointUrl);
+    assert.strictEqual(dlResponse.status, 200, "Download URL returns HTTP 200 OK");
+    assert.strictEqual(dlResponse.headers.get("content-type"), "video/mp4", "Downloaded file MIME type is video/mp4");
+    assert(
+      Boolean(dlResponse.headers.get("content-disposition")?.includes("attachment")),
+      "Content-Disposition specifies attachment download"
+    );
+    const dlBytes = await dlResponse.arrayBuffer();
+    assert(dlBytes.byteLength > 0, "Downloaded stream contains non-empty file content");
+    console.log(`  ✓ 4. Download endpoint verified via HTTP 200 (${dlBytes.byteLength} bytes)`);
+    passed++;
+
+    // 5. Verify physical media file on disk remains completely untouched
+    const dStat26 = fs.statSync(path.join(diskMediaDir25, diskMediaFiles25[0]));
+    assert.strictEqual(dStat26.size, 630675104, "Original physical media file remains completely untouched");
+    console.log("  ✓ 5. CRITICAL POLICY: Original physical media file intact (630675104 bytes)");
     passed++;
   } catch (err) {
     console.error("  ✗ FAIL: Live Vite dev server / proxy test failed:", err);

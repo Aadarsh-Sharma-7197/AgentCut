@@ -12,8 +12,15 @@ dotenv.config({ path: path.resolve(process.cwd(), "apps/server/.env") });
 const { default: app } = await import("./index.js");
 import { connectDB, closeDB, getDB } from "./config/db.js";
 import { getProjectMediaDir, resolveStoredFilePath, getProjectExportDir, resolveExportFilePath } from "./config/storage.js";
-import { getFFprobePath } from "./utils/ffprobe.js";
+import { getFFprobePath, inspectVideo } from "./utils/ffprobe.js";
 import { getFFmpegPath, checkFFmpegAvailable, validateFFmpegSafety } from "./utils/ffmpeg.js";
+import {
+  buildFFmpegRenderArgs,
+  verifyRenderOutput,
+  executeRenderJob,
+  isJobActive,
+  cancelActiveRender
+} from "./services/render-pipeline.service.js";
 import { ObjectId } from "mongodb";
 import type { Server } from "http";
 
@@ -927,14 +934,14 @@ async function runTests() {
       const renderJobsCol = getDB().collection("render_jobs");
       const jobInDb = await renderJobsCol.findOne({ jobId: createdJob.id });
       assert(Boolean(jobInDb), "Render job document persisted durably in MongoDB Atlas");
-      assert(jobInDb?.status === "queued", "Persisted DB status is 'queued'");
+      assert(["queued", "validating", "rendering"].includes(jobInDb?.status || ""), "Persisted DB status is in valid state");
 
       // Verify retrieving single job via GET endpoint
       const getJobRes = await fetch(`${baseUrl}/api/projects/${projectId}/render/jobs/${createdJob.id}`);
       assert(getJobRes.status === 200, "GET /api/projects/:id/render/jobs/:jobId returns 200 OK");
       const getJobJson = (await getJobRes.json()) as any;
       assert(getJobJson.data?.id === createdJob.id, "Retrieved job ID matches created job");
-      assert(getJobJson.data?.status === "queued", "Retrieved job status is 'queued'");
+      assert(["queued", "validating", "rendering"].includes(getJobJson.data?.status), "Retrieved job status is in valid active state");
 
       // Verify listing jobs for project
       const listJobsRes = await fetch(`${baseUrl}/api/projects/${projectId}/render/jobs`);
@@ -991,6 +998,286 @@ async function runTests() {
         body: JSON.stringify({})
       });
       assert(noTlProjRes.status === 500 || noTlProjRes.status === 400, "Reject render job on project with no timeline");
+
+      // ----------------------------------------------------
+      // 31. FFmpeg Argument Construction & Filtergraph Generation
+      // ----------------------------------------------------
+      console.log("\n[Test 31] FFmpeg Argument Construction & Filtergraph Generation");
+      const mockResolvedPlan = {
+        projectId,
+        timelineId: "tl_mock",
+        settings: { width: 320, height: 240, frameRate: 30 },
+        duration: 2.0,
+        videoClips: [
+          {
+            clipId: "c_v1",
+            assetId: "a1",
+            trackId: "tr_v",
+            trackType: "video" as const,
+            sourceStart: 0,
+            sourceEnd: 0.8,
+            timelineStart: 0.5,
+            duration: 0.8,
+            timelineEnd: 1.3,
+            resolvedFilePath: validMp4Path,
+            hasAudio: true
+          }
+        ],
+        audioClips: [
+          {
+            clipId: "c_a1",
+            assetId: "a2",
+            trackId: "tr_a",
+            trackType: "audio" as const,
+            sourceStart: 0,
+            sourceEnd: 0.8,
+            timelineStart: 0.5,
+            duration: 0.8,
+            timelineEnd: 1.3,
+            resolvedFilePath: validMp4Path,
+            hasAudio: true
+          }
+        ],
+        tracks: [],
+        output: {
+          format: "mp4" as const,
+          videoCodec: "libx264" as const,
+          audioCodec: "aac" as const,
+          pixelFormat: "yuv420p" as const
+        },
+        createdAt: new Date().toISOString()
+      };
+
+      const mockTmpOutput = resolveExportFilePath(projectId, "mock_test.tmp.mp4");
+      const builtArgs = buildFFmpegRenderArgs(mockResolvedPlan, mockTmpOutput);
+      assert(builtArgs.includes("-filter_complex"), "Arguments include -filter_complex flag");
+      assert(builtArgs.includes("-map"), "Arguments include -map flags");
+      assert(builtArgs.includes("[outv]"), "Arguments map [outv]");
+      assert(builtArgs.includes("[outa]"), "Arguments map [outa]");
+      assert(builtArgs.includes("libx264"), "Arguments specify libx264 codec");
+      assert(builtArgs.includes("yuv420p"), "Arguments specify yuv420p pixel format");
+      assert(builtArgs.includes("aac"), "Arguments specify aac audio codec");
+
+      const filterComplexArg = builtArgs[builtArgs.indexOf("-filter_complex") + 1];
+      assert(filterComplexArg.includes("color=c=black"), "Filter complex generates black video for leading/trailing gaps");
+      assert(filterComplexArg.includes("trim=start=0.0000:end=0.8000"), "Filter complex generates trim filter for clip");
+      assert(filterComplexArg.includes("scale=320:240"), "Filter complex scales video to plan dimensions");
+      assert(filterComplexArg.includes("anullsrc="), "Filter complex generates silence for audio gaps");
+      assert(filterComplexArg.includes("concat=n=3:v=1:a=0"), "Filter complex concats 3 video segments");
+      assert(filterComplexArg.includes("concat=n=3:v=0:a=1"), "Filter complex concats 3 audio segments");
+
+      // Verify built arguments pass strict security validation without throwing
+      let builtArgsSafe = true;
+      try {
+        validateFFmpegSafety(builtArgs);
+      } catch {
+        builtArgsSafe = false;
+      }
+      assert(builtArgsSafe, "FFmpeg argument array strictly passes validateFFmpegSafety");
+
+      // ----------------------------------------------------
+      // 32. Execution of MP4 Rendering with FFmpeg, Progress Tracking & Verification
+      // ----------------------------------------------------
+      console.log("\n[Test 32] MP4 Rendering Execution, Progress Tracking & Output Verification");
+      const renderStartRes = await fetch(`${baseUrl}/api/projects/${projectId}/render/jobs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({})
+      });
+      assert(renderStartRes.status === 201, "POST /api/projects/:id/render/jobs returns 201 Created");
+      const startJobData = ((await renderStartRes.json()) as any).data;
+      const executionJobId = startJobData.id;
+
+      // Poll until the background rendering job finishes (timeout 25 seconds)
+      let finalExecutionJob: any = null;
+      const pollStartTime = Date.now();
+      while (Date.now() - pollStartTime < 25000) {
+        await new Promise((r) => setTimeout(r, 400));
+        const pollRes = await fetch(`${baseUrl}/api/projects/${projectId}/render/jobs/${executionJobId}`);
+        const pollJson = (await pollRes.json()) as any;
+        const currentStatus = pollJson.data?.status;
+        if (currentStatus === "completed" || currentStatus === "failed" || currentStatus === "canceled") {
+          finalExecutionJob = pollJson.data;
+          break;
+        }
+      }
+
+      assert(Boolean(finalExecutionJob), "Render job finished within timeout");
+      assert(finalExecutionJob?.status === "completed", `Render job status is 'completed' (was: ${finalExecutionJob?.status}, error: ${finalExecutionJob?.error})`);
+      assert(finalExecutionJob?.progress === 100, "Completed render job progress is 100%");
+      assert(Boolean(finalExecutionJob?.outputMetadata?.outputFileName), "Output metadata contains outputFileName");
+      assert(Boolean(finalExecutionJob?.outputMetadata?.fileSizeBytes && finalExecutionJob.outputMetadata.fileSizeBytes > 0), "Output file size > 0 bytes");
+
+      const finalRenderFilePath = resolveExportFilePath(projectId, finalExecutionJob.outputMetadata.outputFileName);
+      assert(fs.existsSync(finalRenderFilePath), "Rendered MP4 file exists at final path on disk");
+
+      const tmpRenderFilePath = resolveExportFilePath(projectId, `render_${executionJobId}.tmp.mp4`);
+      assert(!fs.existsSync(tmpRenderFilePath), "Temporary file (.tmp.mp4) was removed upon completion");
+
+      // Inspect completed MP4 with FFprobe
+      const outputInspection = await inspectVideo(finalRenderFilePath);
+      assert(outputInspection.videoCodec === "h264", "Rendered MP4 video codec is h264");
+      assert(outputInspection.width === 1920, "Rendered MP4 width matches settings (1920)");
+      assert(outputInspection.height === 1080, "Rendered MP4 height matches settings (1080)");
+      assert(outputInspection.audioCodec === "aac", "Rendered MP4 contains AAC audio stream");
+      assert(outputInspection.duration > 0, "Rendered MP4 duration is > 0s");
+
+      // ----------------------------------------------------
+      // 33. Cancellation of Render Job & Temp File Cleanup
+      // ----------------------------------------------------
+      console.log("\n[Test 33] Cancellation of Render Job & Temp File Cleanup");
+      const cancelJobRes = await fetch(`${baseUrl}/api/projects/${projectId}/render/jobs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({})
+      });
+      const cancelJobId = ((await cancelJobRes.json()) as any).data.id;
+
+      // Cancel the job
+      const postCancelRes = await fetch(
+        `${baseUrl}/api/projects/${projectId}/render/jobs/${cancelJobId}/cancel`,
+        { method: "POST" }
+      );
+      assert(postCancelRes.status === 200, "POST cancel returns 200 OK");
+      const postCancelJson = (await postCancelRes.json()) as any;
+      assert(postCancelJson.data?.status === "canceled", "Canceled job has status 'canceled'");
+
+      // Verify no temporary file was left behind
+      const cancelTmpPath = resolveExportFilePath(projectId, `render_${cancelJobId}.tmp.mp4`);
+      assert(!fs.existsSync(cancelTmpPath), "Temporary render file was cleaned up on cancellation");
+
+      // ----------------------------------------------------
+      // 34. Duplicate Concurrent Execution Prevention
+      // ----------------------------------------------------
+      console.log("\n[Test 34] Duplicate Concurrent Execution Prevention");
+      assert(isJobActive("nonexistent_fake_job") === false, "isJobActive returns false for inactive jobs");
+      const duplicateExecResult = await executeRenderJob(finalExecutionJob.id);
+      assert(duplicateExecResult === null, "executeRenderJob on completed job returns null without re-executing");
+
+      // ----------------------------------------------------
+      // 35. Download Endpoint Authorization & Streaming
+      // ----------------------------------------------------
+      console.log("\n[Test 35] Download Endpoint Authorization & Streaming");
+      const downloadRes = await fetch(
+        `${baseUrl}/api/projects/${projectId}/render/jobs/${executionJobId}/download`
+      );
+      assert(downloadRes.status === 200, "GET /api/projects/:id/render/jobs/:jobId/download returns 200 OK");
+      assert(downloadRes.headers.get("content-type") === "video/mp4", "Content-Type is 'video/mp4'");
+      assert(
+        Boolean(downloadRes.headers.get("content-disposition")?.includes("attachment")),
+        "Content-Disposition specifies attachment"
+      );
+      const downloadBuf = await downloadRes.arrayBuffer();
+      assert(downloadBuf.byteLength > 0, "Downloaded stream contains file bytes");
+
+      // Reject download of canceled job
+      const cancelDownloadRes = await fetch(
+        `${baseUrl}/api/projects/${projectId}/render/jobs/${cancelJobId}/download`
+      );
+      assert(cancelDownloadRes.status === 400, "Reject download of non-completed job with 400 Bad Request");
+
+      // Reject download of nonexistent job
+      const missingDownloadRes = await fetch(
+        `${baseUrl}/api/projects/${projectId}/render/jobs/missing_job_123/download`
+      );
+      assert(missingDownloadRes.status === 404, "Reject download of nonexistent job with 404");
+
+      // Reject cross-project unauthorized download attempt
+      const crossDownloadRes = await fetch(
+        `${baseUrl}/api/projects/${project2Id}/render/jobs/${executionJobId}/download`
+      );
+      assert(crossDownloadRes.status === 404, "Cross-project download attempt returns 404");
+
+      // ----------------------------------------------------
+      // 36. Real Project Rendering & Verification (Project: 6af851b5d8c9874f24593e12)
+      // ----------------------------------------------------
+      console.log("\n[Test 36] Real Project Rendering & Verification (6af851b5d8c9874f24593e12)");
+      const realProjId = "6af851b5d8c9874f24593e12";
+      const realProjCheck = await fetch(`${baseUrl}/api/projects/${realProjId}`);
+      if (realProjCheck.status === 200) {
+        // Save a fast 2-second clip timeline on real project
+        const tlGetRes = await fetch(`${baseUrl}/api/projects/${realProjId}/timeline`);
+        const originalRealTl = ((await tlGetRes.json()) as any).data;
+
+        const fastTestTl = {
+          ...originalRealTl,
+          tracks: [
+            {
+              ...originalRealTl.tracks[0],
+              clips: [
+                {
+                  ...originalRealTl.tracks[0].clips[0],
+                  sourceStart: 0,
+                  sourceEnd: 2.0,
+                  timelineStart: 0
+                }
+              ]
+            }
+          ]
+        };
+
+        // Save fast timeline
+        await fetch(`${baseUrl}/api/projects/${realProjId}/timeline`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(fastTestTl)
+        });
+
+        // Trigger render
+        const realRenderRes = await fetch(`${baseUrl}/api/projects/${realProjId}/render/jobs`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({})
+        });
+        assert(realRenderRes.status === 201, "Real project render job enqueued with 201");
+        const realJobId = ((await realRenderRes.json()) as any).data.id;
+
+        // Poll for completion (timeout 30s)
+        let completedRealJob: any = null;
+        const realPollStart = Date.now();
+        while (Date.now() - realPollStart < 30000) {
+          await new Promise((r) => setTimeout(r, 500));
+          const rRes = await fetch(`${baseUrl}/api/projects/${realProjId}/render/jobs/${realJobId}`);
+          const rJson = (await rRes.json()) as any;
+          if (rJson.data?.status === "completed" || rJson.data?.status === "failed") {
+            completedRealJob = rJson.data;
+            break;
+          }
+        }
+
+        assert(completedRealJob?.status === "completed", `Real project render finished with 'completed' status (was: ${completedRealJob?.status})`);
+        const realOutFile = resolveExportFilePath(realProjId, completedRealJob.outputMetadata.outputFileName);
+        assert(fs.existsSync(realOutFile), "Real project rendered MP4 exists on filesystem");
+
+        // Inspect output MP4 with FFprobe
+        const realInspect = await inspectVideo(realOutFile);
+        assert(realInspect.width === 1920, "Real project MP4 width is 1920");
+        assert(realInspect.height === 1080, "Real project MP4 height is 1080");
+        assert(realInspect.videoCodec === "h264", "Real project MP4 video codec is h264");
+        assert(realInspect.audioCodec === "aac", "Real project MP4 audio codec is aac");
+        assert(Math.abs(realInspect.duration - 2.0) <= 0.5, "Real project MP4 duration matches (2.0s)");
+
+        // Test download endpoint for real project
+        const realDownloadRes = await fetch(`${baseUrl}/api/projects/${realProjId}/render/jobs/${realJobId}/download`);
+        assert(realDownloadRes.status === 200, "Download endpoint for real project returns 200 OK");
+        assert(realDownloadRes.headers.get("content-type") === "video/mp4", "Real project download content-type is video/mp4");
+
+        // Restore original 30s timeline
+        await fetch(`${baseUrl}/api/projects/${realProjId}/timeline`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(originalRealTl)
+        });
+
+        // Verify original source video file remains 100% intact
+        const realMediaDir = getProjectMediaDir(realProjId);
+        const realMediaFiles = fs.readdirSync(realMediaDir);
+        const realMediaFile = path.join(realMediaDir, realMediaFiles[0]);
+        const realStat = fs.statSync(realMediaFile);
+        assert(realStat.size === 630675104, "CRITICAL: Real project source media file intact (630675104 bytes)");
+      } else {
+        console.log("  - Skipped: Real project 6af851b5d8c9874f24593e12 not found in current environment");
+      }
 
       // ----------------------------------------------------
       // 24. Project Deletion: Removes Timeline Metadata & Preserves Files

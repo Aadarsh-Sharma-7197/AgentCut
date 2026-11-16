@@ -17,6 +17,7 @@ import { connectDB } from "./config/db.js";
 import { initMediaIndexes } from "./services/media.service.js";
 import { initTimelineIndexes } from "./services/timeline.service.js";
 import { initRenderJobIndexes } from "./services/render-job.service.js";
+import { registerPipelineShutdownHooks } from "./services/render-pipeline.service.js";
 import { projectRouter } from "./routes/project.routes.js";
 
 const app = express();
@@ -63,6 +64,7 @@ export async function startServer() {
     await initMediaIndexes();
     await initTimelineIndexes();
     await initRenderJobIndexes();
+    registerPipelineShutdownHooks();
     const server = app.listen(port, () => {
       console.log(`[Server] AgentCut API running on http://localhost:${port}`);
     });

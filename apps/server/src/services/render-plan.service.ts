@@ -10,6 +10,7 @@ import { resolveStoredFilePath } from "../config/storage.js";
 
 export interface ServerRenderClip extends RenderClip {
   resolvedFilePath: string;
+  hasAudio?: boolean;
 }
 
 export interface ServerResolvedRenderPlan extends Omit<RenderPlan, "videoClips" | "audioClips"> {
@@ -42,6 +43,23 @@ export async function validateServerRenderPlan(
 
   if (plan.projectId !== projectId) {
     errors.push(`Render plan projectId ('${plan.projectId}') does not match target project ('${projectId}').`);
+  }
+
+  // Validate supported track configurations for single-pass cut rendering:
+  // - Exactly one enabled video track
+  // - At most one enabled audio track
+  const enabledVideoTracks = plan.tracks.filter((t) => t.enabled && t.type === "video");
+  if (enabledVideoTracks.length !== 1) {
+    errors.push(
+      `Rendering currently supports exactly one enabled video track. Found ${enabledVideoTracks.length} enabled video track(s).`
+    );
+  }
+
+  const enabledAudioTracks = plan.tracks.filter((t) => t.enabled && t.type === "audio");
+  if (enabledAudioTracks.length > 1) {
+    errors.push(
+      `Rendering currently supports at most one enabled audio track. Found ${enabledAudioTracks.length} enabled audio track(s).`
+    );
   }
 
   // 2. Fetch all media assets for the project from the database
@@ -125,7 +143,8 @@ export async function validateServerRenderPlan(
 
     return {
       ...clip,
-      resolvedFilePath
+      resolvedFilePath,
+      hasAudio: Boolean(asset.audioCodec && asset.audioCodec.trim() !== "")
     };
   };
 

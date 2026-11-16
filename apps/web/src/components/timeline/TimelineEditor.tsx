@@ -30,6 +30,7 @@ import { TimelineToolbar, type SaveStatus } from "./TimelineToolbar";
 import { TimelineRuler } from "./TimelineRuler";
 import { TimelineTrack } from "./TimelineTrack";
 import { TimelinePlayhead } from "./TimelinePlayhead";
+import { TimelineExportModal } from "./TimelineExportModal";
 import "./timeline.css";
 
 interface TimelineEditorProps {
@@ -98,6 +99,9 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
   const historyRef = useRef<TimelineHistory>(new TimelineHistory({ maxHistory: 50 }));
   const [canUndo, setCanUndo] = useState<boolean>(false);
   const [canRedo, setCanRedo] = useState<boolean>(false);
+
+  // Export MP4 modal state
+  const [isExportModalOpen, setIsExportModalOpen] = useState<boolean>(false);
 
   const updateHistoryFlags = useCallback(() => {
     if (historyRef.current) {
@@ -840,6 +844,7 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
           canDelete={Boolean(selectedClipId)}
           onDelete={handleDeleteSelectedClip}
           onAddTrack={handleAddTrack}
+          onOpenExport={() => setIsExportModalOpen(true)}
           onZoomChange={setZoom}
           onResetZoom={handleResetZoom}
         />
@@ -1042,6 +1047,14 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
         </div>
       </div>
     </div>
+
+    {/* Export to MP4 Modal */}
+    <TimelineExportModal
+      projectId={projectId}
+      isOpen={isExportModalOpen}
+      onClose={() => setIsExportModalOpen(false)}
+      timeline={timeline}
+    />
   </div>
 );
 };

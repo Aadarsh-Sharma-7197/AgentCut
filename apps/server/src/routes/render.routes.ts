@@ -4,7 +4,8 @@ import {
   createRenderJobHandler,
   getRenderJobHandler,
   listRenderJobsHandler,
-  cancelRenderJobHandler
+  cancelRenderJobHandler,
+  downloadRenderJobOutputHandler
 } from "../controllers/render.controller.js";
 
 export const renderRouter = Router({ mergeParams: true });
@@ -14,6 +15,9 @@ renderRouter.post("/plan", validateRenderPlanHandler);
 
 // POST /api/projects/:projectId/render/jobs — Prepares and enqueues a render job
 renderRouter.post("/jobs", createRenderJobHandler);
+
+// GET /api/projects/:projectId/render/jobs/:jobId/download — Downloads rendered MP4 file
+renderRouter.get("/jobs/:jobId/download", downloadRenderJobOutputHandler);
 
 // GET /api/projects/:projectId/render/jobs/:jobId — Retrieves job status and progress
 renderRouter.get("/jobs/:jobId", getRenderJobHandler);

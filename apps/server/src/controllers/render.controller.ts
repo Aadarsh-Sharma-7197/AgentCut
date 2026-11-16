@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import { ObjectId } from "mongodb";
+import fs from "fs";
 import {
   type Timeline,
   type CreateRenderJobDTO,
@@ -10,6 +11,7 @@ import * as timelineService from "../services/timeline.service.js";
 import * as renderJobService from "../services/render-job.service.js";
 import { validateServerRenderPlan } from "../services/render-plan.service.js";
 import { RenderValidationError } from "../services/render-job.service.js";
+import { resolveExportFilePath } from "../config/storage.js";
 
 export async function validateRenderPlanHandler(req: Request, res: Response): Promise<void> {
   const { projectId } = req.params;
@@ -160,5 +162,64 @@ export async function cancelRenderJobHandler(req: Request, res: Response): Promi
   } catch (err) {
     console.error("[RenderController] cancelRenderJob error:", err);
     res.status(400).json({ error: (err as Error).message || "Failed to cancel render job." });
+  }
+}
+
+export async function downloadRenderJobOutputHandler(req: Request, res: Response): Promise<void> {
+  const { projectId, jobId } = req.params;
+
+  if (typeof projectId !== "string" || !ObjectId.isValid(projectId)) {
+    res.status(400).json({ error: "Invalid project ID format." });
+    return;
+  }
+  if (typeof jobId !== "string" || jobId.trim() === "") {
+    res.status(400).json({ error: "Invalid render job ID." });
+    return;
+  }
+
+  try {
+    const project = await projectService.getProjectById(projectId);
+    if (!project) {
+      res.status(404).json({ error: "Project not found." });
+      return;
+    }
+
+    const job = await renderJobService.getRenderJobById(projectId, jobId);
+    if (!job) {
+      res.status(404).json({ error: "Render job not found." });
+      return;
+    }
+
+    if (job.status !== "completed") {
+      res.status(400).json({
+        error: `Render job is not completed (current status: '${job.status}'). Output file is not yet available for download.`
+      });
+      return;
+    }
+
+    const fileName = job.outputMetadata?.outputFileName || `render_${jobId}.mp4`;
+    const filePath = resolveExportFilePath(projectId, fileName);
+
+    if (!fs.existsSync(filePath)) {
+      res.status(404).json({ error: "Rendered output file was not found on disk." });
+      return;
+    }
+
+    const stat = fs.statSync(filePath);
+    res.setHeader("Content-Type", "video/mp4");
+    res.setHeader("Content-Length", stat.size);
+    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+
+    const stream = fs.createReadStream(filePath);
+    stream.on("error", (err) => {
+      console.error("[RenderController] Error streaming download:", err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Failed to stream rendered video." });
+      }
+    });
+    stream.pipe(res);
+  } catch (err) {
+    console.error("[RenderController] downloadRenderJobOutput error:", err);
+    res.status(500).json({ error: "Failed to download rendered video." });
   }
 }

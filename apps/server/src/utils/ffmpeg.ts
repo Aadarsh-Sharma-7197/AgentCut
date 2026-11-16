@@ -52,12 +52,24 @@ export function validateFFmpegSafety(args: string[]): void {
     throw new Error("FFmpeg arguments must be an array of discrete strings.");
   }
 
-  const forbiddenTokens = [";", "&&", "||", "|", "`", "$", "\n", "\r"];
-
-  for (const arg of args) {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
     if (typeof arg !== "string") {
       throw new Error(`Invalid FFmpeg argument type: ${typeof arg}. Expected string.`);
     }
+
+    const prevArg = i > 0 ? args[i - 1] : "";
+    const isFilterArg =
+      prevArg === "-filter_complex" ||
+      prevArg === "-lavfi" ||
+      prevArg === "-vf" ||
+      prevArg === "-af";
+
+    // In FFmpeg, semicolons are used as filterchain separators inside filter graphs.
+    // For non-filter arguments, semicolons are strictly blocked to prevent shell command concatenation.
+    const forbiddenTokens = isFilterArg
+      ? ["&&", "||", "|", "`", "$", "\n", "\r"]
+      : [";", "&&", "||", "|", "`", "$", "\n", "\r"];
 
     for (const token of forbiddenTokens) {
       if (arg.includes(token)) {

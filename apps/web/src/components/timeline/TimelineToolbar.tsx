@@ -21,6 +21,7 @@ interface TimelineToolbarProps {
   canDelete?: boolean;
   onDelete?: () => void;
   onAddTrack?: (type: TrackType) => void;
+  onOpenExport?: () => void;
   onZoomChange: (newZoom: number) => void;
   onResetZoom: () => void;
 }
@@ -42,6 +43,7 @@ export const TimelineToolbar: React.FC<TimelineToolbarProps> = ({
   canDelete = false,
   onDelete,
   onAddTrack,
+  onOpenExport,
   onZoomChange,
   onResetZoom
 }) => {
@@ -242,6 +244,17 @@ export const TimelineToolbar: React.FC<TimelineToolbarProps> = ({
             +
           </button>
         </div>
+
+        {onOpenExport && (
+          <button
+            type="button"
+            className="timeline-export-btn"
+            onClick={onOpenExport}
+            title="Export timeline to MP4 video"
+          >
+            🎬 Export MP4
+          </button>
+        )}
       </div>
     </div>
   );

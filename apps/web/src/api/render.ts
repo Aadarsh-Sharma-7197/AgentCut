@@ -101,6 +101,13 @@ export async function listRenderJobsApi(projectId: string): Promise<RenderJob[]>
 }
 
 /**
+ * Returns the direct download URL for a completed render job.
+ */
+export function getRenderJobDownloadUrl(projectId: string, jobId: string): string {
+  return `${API_PREFIX}/api/projects/${projectId}/render/jobs/${jobId}/download`;
+}
+
+/**
  * Cancels a queued or validating render job.
  */
 export async function cancelRenderJobApi(

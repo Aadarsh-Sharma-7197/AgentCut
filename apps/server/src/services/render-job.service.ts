@@ -9,6 +9,7 @@ import {
 import { RenderJobDocument, toRenderJobDTO } from "../models/render-job.model.js";
 import * as timelineService from "./timeline.service.js";
 import { validateServerRenderPlan } from "./render-plan.service.js";
+import { executeRenderJob, cancelActiveRender, isJobActive } from "./render-pipeline.service.js";
 
 const COLLECTION_NAME = "render_jobs";
 
@@ -82,7 +83,24 @@ export async function createRenderJob(
   };
 
   await collection.insertOne(doc);
-  return toRenderJobDTO(doc);
+  const dto = toRenderJobDTO(doc);
+
+  // Trigger background render pipeline asynchronously without blocking HTTP response
+  setImmediate(() => {
+    executeRenderJob(jobId).catch((err) => {
+      console.error(`[RenderJobService] Error starting render pipeline for job ${jobId}:`, err);
+    });
+  });
+
+  return dto;
+}
+
+/**
+ * Retrieves the raw MongoDB document of a render job by its job ID.
+ */
+export async function getRenderJobRawById(jobId: string): Promise<RenderJobDocument | null> {
+  const collection = getCollection();
+  return collection.findOne({ jobId });
 }
 
 /**
@@ -143,14 +161,20 @@ export async function updateRenderJobStatus(
     updateFields.outputMetadata = updates.outputMetadata;
   }
 
+  const filter: Record<string, unknown> = { jobId };
+  if (status !== "canceled") {
+    // A canceled job must never be overwritten by in-flight queued/validating/rendering updates
+    filter.status = { $ne: "canceled" };
+  }
+
   const result = await collection.findOneAndUpdate(
-    { jobId },
+    filter,
     { $set: updateFields },
     { returnDocument: "after" }
   );
 
   if (!result) {
-    return null;
+    return getRenderJobRawById(jobId).then((doc) => (doc ? toRenderJobDTO(doc) : null));
   }
 
   return toRenderJobDTO(result);
@@ -170,6 +194,12 @@ export async function cancelRenderJob(
 
   if (job.status === "completed" || job.status === "failed") {
     throw new Error(`Cannot cancel a job with status '${job.status}'.`);
+  }
+
+  // If process is actively running in background, cancel process and clean up temporary files
+  if (isJobActive(jobId)) {
+    await cancelActiveRender(jobId);
+    return getRenderJobById(projectId, jobId);
   }
 
   return updateRenderJobStatus(jobId, "canceled");
