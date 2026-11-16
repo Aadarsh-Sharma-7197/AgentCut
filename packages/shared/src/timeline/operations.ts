@@ -80,6 +80,10 @@ export function addTrack(
   input: CreateTrackInput,
   options?: ValidateTimelineOptions
 ): Timeline {
+  if (!input.name || typeof input.name !== "string" || input.name.trim() === "") {
+    throw new Error("Cannot add track: track name must be a non-empty string.");
+  }
+  const trimmedName = input.name.trim();
   const trackId = input.id || generateId();
 
   // Check for duplicate track ID
@@ -91,7 +95,7 @@ export function addTrack(
 
   const newTrack: Track = {
     id: trackId,
-    name: input.name,
+    name: trimmedName,
     type: input.type,
     index,
     enabled: input.enabled ?? true,
@@ -108,11 +112,12 @@ export function addTrack(
     updatedTracks.push(newTrack);
   } else {
     updatedTracks.splice(index, 0, newTrack);
-    // Normalize track indices
-    updatedTracks.forEach((t, i) => {
-      t.index = i;
-    });
   }
+
+  // Normalize track indices sequentially (0, 1, 2, ...)
+  updatedTracks.forEach((t, i) => {
+    t.index = i;
+  });
 
   const nextTimeline: Timeline = {
     ...timeline,
@@ -124,6 +129,233 @@ export function addTrack(
   const validation = validateTimeline(nextTimeline, options);
   if (!validation.valid) {
     throw new TimelineValidationError("Failed to add track: validation error.", validation.errors);
+  }
+
+  return nextTimeline;
+}
+
+/**
+ * Generates a sensible default track name based on existing tracks of that type.
+ * e.g., "Video 1", "Video 2", "Audio 1", "Captions 1".
+ */
+export function generateDefaultTrackName(timeline: Timeline, type: TrackType): string {
+  const count = timeline.tracks.filter((t) => t.type === type).length + 1;
+  switch (type) {
+    case "video":
+      return `Video ${count}`;
+    case "audio":
+      return `Audio ${count}`;
+    case "caption":
+      return `Captions ${count}`;
+    default:
+      return `Track ${count}`;
+  }
+}
+
+/**
+ * Renames a timeline track immutably.
+ *
+ * Requirements:
+ * - Finds the specified track by ID.
+ * - Rejects empty or whitespace-only names.
+ * - Trims unnecessary leading and trailing whitespace.
+ * - Preserves track ID, type, index, enabled state, and all clips.
+ * - Enforces validation on the resulting timeline.
+ * - Guarantees deep immutability.
+ */
+export function renameTrack(
+  timeline: Timeline,
+  trackId: string,
+  newName: string,
+  options?: ValidateTimelineOptions
+): Timeline {
+  if (typeof newName !== "string" || newName.trim() === "") {
+    throw new Error(`Cannot rename track: new name must be a non-empty string.`);
+  }
+
+  const trimmedName = newName.trim();
+  const trackExists = timeline.tracks.some((t) => t.id === trackId);
+  if (!trackExists) {
+    throw new Error(`Cannot rename track: track '${trackId}' was not found in timeline.`);
+  }
+
+  const updatedTracks = timeline.tracks.map((t) => {
+    if (t.id === trackId) {
+      return {
+        ...t,
+        name: trimmedName,
+        clips: t.clips.map((c) => ({ ...c }))
+      };
+    }
+    return {
+      ...t,
+      clips: t.clips.map((c) => ({ ...c }))
+    };
+  });
+
+  const nextTimeline: Timeline = {
+    ...timeline,
+    settings: { ...timeline.settings },
+    tracks: updatedTracks,
+    updatedAt: new Date().toISOString()
+  };
+
+  const validation = validateTimeline(nextTimeline, options);
+  if (!validation.valid) {
+    throw new TimelineValidationError("Failed to rename track: validation error.", validation.errors);
+  }
+
+  return nextTimeline;
+}
+
+/**
+ * Moves a track to a new target index position immutably.
+ *
+ * Requirements:
+ * - Finds the specified track by ID.
+ * - Rejects invalid target indices.
+ * - Recalculates all track indices sequentially (0, 1, 2, ...).
+ * - Preserves track IDs, types, and clips.
+ * - Enforces validation on the resulting timeline.
+ * - Guarantees deep immutability.
+ */
+export function moveTrackOrder(
+  timeline: Timeline,
+  trackId: string,
+  targetIndex: number,
+  options?: ValidateTimelineOptions
+): Timeline {
+  const currentIndex = timeline.tracks.findIndex((t) => t.id === trackId);
+  if (currentIndex === -1) {
+    throw new Error(`Cannot move track: track '${trackId}' was not found in timeline.`);
+  }
+
+  if (
+    typeof targetIndex !== "number" ||
+    !Number.isInteger(targetIndex) ||
+    targetIndex < 0 ||
+    targetIndex >= timeline.tracks.length
+  ) {
+    throw new Error(
+      `Cannot move track: targetIndex must be an integer between 0 and ${timeline.tracks.length - 1} (got ${targetIndex}).`
+    );
+  }
+
+  if (currentIndex === targetIndex) {
+    return timeline;
+  }
+
+  const updatedTracks = timeline.tracks.map((t) => ({
+    ...t,
+    clips: t.clips.map((c) => ({ ...c }))
+  }));
+
+  const [movedTrack] = updatedTracks.splice(currentIndex, 1);
+  updatedTracks.splice(targetIndex, 0, movedTrack);
+
+  // Recalculate 0-based sequential indices consistently
+  updatedTracks.forEach((t, i) => {
+    t.index = i;
+  });
+
+  const nextTimeline: Timeline = {
+    ...timeline,
+    settings: { ...timeline.settings },
+    tracks: updatedTracks,
+    updatedAt: new Date().toISOString()
+  };
+
+  const validation = validateTimeline(nextTimeline, options);
+  if (!validation.valid) {
+    throw new TimelineValidationError("Failed to reorder tracks: validation error.", validation.errors);
+  }
+
+  return nextTimeline;
+}
+
+/**
+ * Reorders a track up or down by 1 position immutably.
+ *
+ * Requirements:
+ * - "up" moves the track towards index 0 (higher priority/earlier in display).
+ * - "down" moves the track towards the bottom (lower priority/later in display).
+ * - If moving up while already at top, or down while already at bottom, throws informative error.
+ */
+export function reorderTrack(
+  timeline: Timeline,
+  trackId: string,
+  direction: "up" | "down",
+  options?: ValidateTimelineOptions
+): Timeline {
+  const currentIndex = timeline.tracks.findIndex((t) => t.id === trackId);
+  if (currentIndex === -1) {
+    throw new Error(`Cannot reorder track: track '${trackId}' was not found in timeline.`);
+  }
+
+  if (direction === "up") {
+    if (currentIndex <= 0) {
+      throw new Error(`Cannot move track '${trackId}' up: track is already at the topmost position.`);
+    }
+    return moveTrackOrder(timeline, trackId, currentIndex - 1, options);
+  } else if (direction === "down") {
+    if (currentIndex >= timeline.tracks.length - 1) {
+      throw new Error(`Cannot move track '${trackId}' down: track is already at the bottommost position.`);
+    }
+    return moveTrackOrder(timeline, trackId, currentIndex + 1, options);
+  } else {
+    throw new Error(`Invalid reorder direction '${direction}'. Must be 'up' or 'down'.`);
+  }
+}
+
+/**
+ * Safely deletes an empty track from the timeline immutably.
+ *
+ * Safety Rules:
+ * - Empty tracks may be deleted.
+ * - Tracks containing clips must NOT be deleted; throws an informative error.
+ * - Does not delete media assets or physical files.
+ * - Re-indexes remaining tracks to maintain continuous 0-based indexing.
+ * - Enforces validation on the resulting timeline.
+ * - Guarantees deep immutability.
+ */
+export function deleteTrack(
+  timeline: Timeline,
+  trackId: string,
+  options?: ValidateTimelineOptions
+): Timeline {
+  const targetTrack = timeline.tracks.find((t) => t.id === trackId);
+  if (!targetTrack) {
+    throw new Error(`Cannot delete track: track '${trackId}' was not found in timeline.`);
+  }
+
+  if (targetTrack.clips.length > 0) {
+    throw new Error(
+      `Cannot delete track '${targetTrack.name}' (${trackId}): track contains ${targetTrack.clips.length} clip(s). Tracks containing clips cannot be deleted. Delete or move the clips first.`
+    );
+  }
+
+  const updatedTracks = timeline.tracks
+    .filter((t) => t.id !== trackId)
+    .map((t) => ({
+      ...t,
+      clips: t.clips.map((c) => ({ ...c }))
+    }));
+
+  // Re-normalize indices
+  updatedTracks.forEach((t, i) => {
+    t.index = i;
+  });
+
+  const nextTimeline: Timeline = {
+    ...timeline,
+    settings: { ...timeline.settings },
+    tracks: updatedTracks,
+    updatedAt: new Date().toISOString()
+  };
+
+  const validation = validateTimeline(nextTimeline, options);
+  if (!validation.valid) {
+    throw new TimelineValidationError("Failed to delete track: validation error.", validation.errors);
   }
 
   return nextTimeline;

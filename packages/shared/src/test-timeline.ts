@@ -8,6 +8,11 @@ import {
   splitClip,
   splitClipWithResult,
   trimClip,
+  renameTrack,
+  reorderTrack,
+  moveTrackOrder,
+  deleteTrack,
+  generateDefaultTrackName,
   validateTimeline,
   validateClip,
   validateTrack,
@@ -1204,6 +1209,181 @@ function runTimelineTests() {
   assert(histPlayback.getHistoryLength() === 1, "12. History length remains 1 during playback scrubbing");
   assert(!histPlayback.canUndo(), "12. canUndo remains false during playback scrubbing");
   assert(!histPlayback.canRedo(), "12. canRedo remains false during playback scrubbing");
+
+  // ==========================================
+  // [Test 19] Track Management Operations & Validation
+  // ==========================================
+  console.log("\n[Test 19] Track Management Operations & Validation");
+
+  // 1. Adding each supported track type
+  let tmTl = createEmptyTimeline({ projectId: "tm_proj" });
+  assert(tmTl.tracks.length === 0, "Initial timeline has 0 tracks");
+
+  tmTl = addTrack(tmTl, { id: "tr_vid_1", name: "Video 1", type: "video" });
+  assert(tmTl.tracks.length === 1 && tmTl.tracks[0].type === "video", "Added video track successfully");
+  assert(tmTl.tracks[0].index === 0, "Video track index is 0");
+
+  tmTl = addTrack(tmTl, { id: "tr_aud_1", name: "Audio 1", type: "audio" });
+  assert(tmTl.tracks.length === 2 && tmTl.tracks[1].type === "audio", "Added audio track successfully");
+  assert(tmTl.tracks[1].index === 1, "Audio track index is 1");
+
+  tmTl = addTrack(tmTl, { id: "tr_cap_1", name: "Captions 1", type: "caption" });
+  assert(tmTl.tracks.length === 3 && tmTl.tracks[2].type === "caption", "Added caption track successfully");
+  assert(tmTl.tracks[2].index === 2, "Caption track index is 2");
+
+  // 2. Default track name generation
+  assert(generateDefaultTrackName(tmTl, "video") === "Video 2", "Default video track name is 'Video 2'");
+  assert(generateDefaultTrackName(tmTl, "audio") === "Audio 2", "Default audio track name is 'Audio 2'");
+  assert(generateDefaultTrackName(tmTl, "caption") === "Captions 2", "Default caption track name is 'Captions 2'");
+
+  // 3. Rejecting blank or whitespace-only names
+  let blankAddThrew = false;
+  try {
+    addTrack(tmTl, { name: "   ", type: "video" });
+  } catch (e: any) {
+    blankAddThrew = true;
+    assert(e.message.includes("track name must be a non-empty string"), "Rejects whitespace-only track name on add");
+  }
+  assert(blankAddThrew, "addTrack throws on whitespace-only name");
+
+  let blankRenameThrew = false;
+  try {
+    renameTrack(tmTl, "tr_vid_1", "   \t  ");
+  } catch (e: any) {
+    blankRenameThrew = true;
+    assert(e.message.includes("new name must be a non-empty string"), "Rejects whitespace-only track name on rename");
+  }
+  assert(blankRenameThrew, "renameTrack throws on whitespace-only name");
+
+  // 4. Renaming a track
+  const renamedTl = renameTrack(tmTl, "tr_vid_1", "  Main B-Roll  ");
+  assert(renamedTl.tracks[0].name === "Main B-Roll", "Track renamed with whitespace trimmed");
+  assert(renamedTl.tracks[0].id === "tr_vid_1", "Preserved track ID on rename");
+  assert(renamedTl.tracks[0].type === "video", "Preserved track type on rename");
+  assert(renamedTl.tracks[0].index === 0, "Preserved track index on rename");
+  assert(tmTl.tracks[0].name === "Video 1", "Original timeline was not mutated on rename (immutability)");
+
+  // 5. Nonexistent track rename throws
+  let nonExistentRenameThrew = false;
+  try {
+    renameTrack(tmTl, "tr_does_not_exist", "Valid Name");
+  } catch (e: any) {
+    nonExistentRenameThrew = true;
+  }
+  assert(nonExistentRenameThrew, "renameTrack throws on nonexistent track ID");
+
+  // 6. Moving a track down (Video at 0 moved down to 1)
+  const movedDownTl = reorderTrack(tmTl, "tr_vid_1", "down");
+  assert(movedDownTl.tracks[0].id === "tr_aud_1", "Audio 1 is now at index 0");
+  assert(movedDownTl.tracks[0].index === 0, "Audio 1 index recalculated to 0");
+  assert(movedDownTl.tracks[1].id === "tr_vid_1", "Video 1 is now at index 1");
+  assert(movedDownTl.tracks[1].index === 1, "Video 1 index recalculated to 1");
+  assert(movedDownTl.tracks[2].id === "tr_cap_1", "Captions 1 remains at index 2");
+  assert(movedDownTl.tracks[2].index === 2, "Captions 1 index remains 2");
+  assert(tmTl.tracks[0].id === "tr_vid_1", "Original timeline tracks order was not mutated");
+
+  // 7. Moving a track up (Captions at 2 moved up to 1)
+  const movedUpTl = reorderTrack(tmTl, "tr_cap_1", "up");
+  assert(movedUpTl.tracks[0].id === "tr_vid_1" && movedUpTl.tracks[0].index === 0, "Video 1 remains at index 0");
+  assert(movedUpTl.tracks[1].id === "tr_cap_1" && movedUpTl.tracks[1].index === 1, "Captions 1 is now at index 1");
+  assert(movedUpTl.tracks[2].id === "tr_aud_1" && movedUpTl.tracks[2].index === 2, "Audio 1 is now at index 2");
+
+  // 8. Boundary move checks (cannot move top up, cannot move bottom down)
+  let topUpThrew = false;
+  try {
+    reorderTrack(tmTl, "tr_vid_1", "up");
+  } catch (e: any) {
+    topUpThrew = true;
+    assert(e.message.includes("already at the topmost position"), "Cannot move top track up");
+  }
+  assert(topUpThrew, "reorderTrack throws when moving topmost track up");
+
+  let bottomDownThrew = false;
+  try {
+    reorderTrack(tmTl, "tr_cap_1", "down");
+  } catch (e: any) {
+    bottomDownThrew = true;
+    assert(e.message.includes("already at the bottommost position"), "Cannot move bottom track down");
+  }
+  assert(bottomDownThrew, "reorderTrack throws when moving bottommost track down");
+
+  // 9. Preserving clips and references across reordering
+  const tlWithClip = addClip(tmTl, {
+    id: "c_vid_clip",
+    assetId: videoAsset.id,
+    trackId: "tr_vid_1",
+    sourceStart: 0,
+    sourceEnd: 10,
+    timelineStart: 0
+  }, { assets: [videoAsset] });
+
+  const reorderedWithClip = reorderTrack(tlWithClip, "tr_vid_1", "down");
+  const movedTrackWithClip = reorderedWithClip.tracks.find((t) => t.id === "tr_vid_1")!;
+  assert(movedTrackWithClip.clips.length === 1, "Clip preserved in moved track");
+  assert(movedTrackWithClip.clips[0].id === "c_vid_clip", "Clip ID preserved in moved track");
+  assert(movedTrackWithClip.clips[0].trackId === "tr_vid_1", "Clip trackId reference preserved");
+  assert(validateTimeline(reorderedWithClip, { assets: [videoAsset] }).valid, "Reordered timeline with clips validates cleanly");
+
+  // 10. Deleting empty track
+  assert(tmTl.tracks.some((t) => t.id === "tr_cap_1"), "Timeline has captions track before delete");
+  const deletedTrackTl = deleteTrack(tmTl, "tr_cap_1");
+  assert(deletedTrackTl.tracks.length === 2, "Captions track removed");
+  assert(!deletedTrackTl.tracks.some((t) => t.id === "tr_cap_1"), "Captions track not present in deleted timeline");
+  assert(deletedTrackTl.tracks[0].index === 0 && deletedTrackTl.tracks[1].index === 1, "Remaining tracks indices normalized sequentially");
+  assert(tmTl.tracks.length === 3, "Original timeline tracks array not mutated (immutability)");
+
+  // 11. Preventing deletion of track containing clips
+  let deleteNonEmptyThrew = false;
+  try {
+    deleteTrack(tlWithClip, "tr_vid_1");
+  } catch (e: any) {
+    deleteNonEmptyThrew = true;
+    assert(e.message.includes("contains 1 clip(s)"), "Informative error specifies track contains clips");
+  }
+  assert(deleteNonEmptyThrew, "deleteTrack strictly blocks deletion of non-empty track");
+
+  // 12. Deleting nonexistent track throws
+  let deleteMissingThrew = false;
+  try {
+    deleteTrack(tmTl, "tr_nonexistent");
+  } catch (e: any) {
+    deleteMissingThrew = true;
+  }
+  assert(deleteMissingThrew, "deleteTrack throws on nonexistent track ID");
+
+  // 13. Playback priority updating deterministically when video tracks are reordered
+  let twoVidTl = createEmptyTimeline({ projectId: "tv_proj" });
+  twoVidTl = addTrack(twoVidTl, { id: "tr_vid_A", name: "Video A", type: "video" });
+  twoVidTl = addTrack(twoVidTl, { id: "tr_vid_B", name: "Video B", type: "video" });
+  twoVidTl = addClip(twoVidTl, {
+    id: "clip_A",
+    assetId: videoAsset.id,
+    trackId: "tr_vid_A",
+    sourceStart: 0,
+    sourceEnd: 15,
+    timelineStart: 0
+  }, { assets: [videoAsset] });
+  twoVidTl = addClip(twoVidTl, {
+    id: "clip_B",
+    assetId: videoAsset.id,
+    trackId: "tr_vid_B",
+    sourceStart: 5,
+    sourceEnd: 20,
+    timelineStart: 0
+  }, { assets: [videoAsset] });
+
+  // Initially: Video A is at index 0, Video B is at index 1
+  const pbSnap1 = getTimelinePlaybackSnapshot(twoVidTl, 2.0);
+  assert(pbSnap1.activeClip?.clip.id === "clip_A", "Initially Video A at index 0 has playback priority");
+
+  // Move Video B up to index 0 (Video A moves to index 1)
+  const reorderedPlaybackTl = reorderTrack(twoVidTl, "tr_vid_B", "up");
+  assert(reorderedPlaybackTl.tracks[0].id === "tr_vid_B", "Video B is now at index 0");
+  assert(reorderedPlaybackTl.tracks[1].id === "tr_vid_A", "Video A is now at index 1");
+
+  const pbSnap2 = getTimelinePlaybackSnapshot(reorderedPlaybackTl, 2.0);
+  assert(pbSnap2.activeClip?.clip.id === "clip_B", "After moving Video B to index 0, Video B takes topmost playback priority");
+
 
 
 

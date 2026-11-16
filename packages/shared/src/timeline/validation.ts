@@ -226,6 +226,7 @@ export function validateTimeline(
   }
 
   const seenTrackIds = new Set<string>();
+  const seenTrackIndices = new Set<number>();
   const seenClipIds = new Set<string>();
 
   timeline.tracks.forEach((track, tIdx) => {
@@ -237,6 +238,17 @@ export function validateTimeline(
         });
       } else {
         seenTrackIds.add(track.id);
+      }
+    }
+
+    if (typeof track.index === "number") {
+      if (seenTrackIndices.has(track.index)) {
+        errors.push({
+          path: `timeline.tracks[${tIdx}].index`,
+          message: `Duplicate track index '${track.index}' found.`
+        });
+      } else {
+        seenTrackIndices.add(track.index);
       }
     }
 

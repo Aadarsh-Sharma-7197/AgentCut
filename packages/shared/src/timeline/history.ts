@@ -43,6 +43,8 @@ export function areTimelinesEquivalent(a: Timeline, b: Timeline): boolean {
     const tB = b.tracks[i];
     if (
       tA.id !== tB.id ||
+      tA.name !== tB.name ||
+      tA.index !== tB.index ||
       tA.type !== tB.type ||
       tA.enabled !== tB.enabled ||
       tA.clips.length !== tB.clips.length

@@ -1,4 +1,5 @@
-import React from "react";
+import React, { useState, useRef, useEffect } from "react";
+import type { TrackType } from "@agentcut/shared";
 import { formatTimeCode, MIN_ZOOM, MAX_ZOOM, ZOOM_STEP } from "../../utils/timelineCalculations";
 
 export type SaveStatus = "idle" | "saving" | "saved" | "error";
@@ -19,6 +20,7 @@ interface TimelineToolbarProps {
   onSplit?: () => void;
   canDelete?: boolean;
   onDelete?: () => void;
+  onAddTrack?: (type: TrackType) => void;
   onZoomChange: (newZoom: number) => void;
   onResetZoom: () => void;
 }
@@ -39,9 +41,27 @@ export const TimelineToolbar: React.FC<TimelineToolbarProps> = ({
   onSplit,
   canDelete = false,
   onDelete,
+  onAddTrack,
   onZoomChange,
   onResetZoom
 }) => {
+  const [showAddMenu, setShowAddMenu] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement | null>(null);
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    if (!showAddMenu) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setShowAddMenu(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [showAddMenu]);
+
   const handleZoomOut = () => {
     const next = Math.max(MIN_ZOOM, Math.round((zoom - ZOOM_STEP) * 100) / 100);
     onZoomChange(next);
@@ -138,6 +158,65 @@ export const TimelineToolbar: React.FC<TimelineToolbarProps> = ({
       </div>
 
       <div className="timeline-toolbar-right">
+        {onAddTrack && (
+          <div className="add-track-dropdown-container" ref={dropdownRef}>
+            <button
+              type="button"
+              className="add-track-btn"
+              title="Add a new track to timeline"
+              onClick={() => setShowAddMenu((prev) => !prev)}
+            >
+              ＋ Add Track ▾
+            </button>
+            {showAddMenu && (
+              <div className="add-track-menu">
+                <button
+                  type="button"
+                  className="add-track-menu-item"
+                  onClick={() => {
+                    onAddTrack("video");
+                    setShowAddMenu(false);
+                  }}
+                >
+                  <span className="menu-icon">🎥</span>
+                  <div className="menu-text">
+                    <span className="menu-title">Video Track</span>
+                    <span className="menu-sub">Video footage & visuals</span>
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  className="add-track-menu-item"
+                  onClick={() => {
+                    onAddTrack("audio");
+                    setShowAddMenu(false);
+                  }}
+                >
+                  <span className="menu-icon">🔊</span>
+                  <div className="menu-text">
+                    <span className="menu-title">Audio Track</span>
+                    <span className="menu-sub">Music, voiceover & SFX</span>
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  className="add-track-menu-item"
+                  onClick={() => {
+                    onAddTrack("caption");
+                    setShowAddMenu(false);
+                  }}
+                >
+                  <span className="menu-icon">💬</span>
+                  <div className="menu-text">
+                    <span className="menu-title">Caption Track</span>
+                    <span className="menu-sub">Subtitles & text</span>
+                  </div>
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="zoom-controls">
           <button
             className="zoom-btn"

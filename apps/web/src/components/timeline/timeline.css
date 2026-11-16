@@ -162,9 +162,9 @@
 }
 
 .ruler-corner-header {
-  width: 190px;
-  min-width: 190px;
-  max-width: 190px;
+  width: 200px;
+  min-width: 200px;
+  max-width: 200px;
   height: 100%;
   position: sticky;
   left: 0;
@@ -230,9 +230,9 @@
 
 /* Track Header (Sticky Column) */
 .timeline-track-header {
-  width: 190px;
-  min-width: 190px;
-  max-width: 190px;
+  width: 200px;
+  min-width: 200px;
+  max-width: 200px;
   position: sticky;
   left: 0;
   z-index: 20;
@@ -967,6 +967,233 @@
 .gap-hint {
   font-size: 0.75rem;
   color: var(--text-muted);
+}
+
+/* ==========================================================================
+   Track Management UI (Step 3.6)
+   ========================================================================== */
+
+/* Inline Track Rename Form */
+.track-rename-form {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  width: 100%;
+}
+
+.track-rename-input {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  background-color: #0f172a;
+  border: 1px solid #38bdf8;
+  border-radius: var(--radius-sm, 4px);
+  color: var(--text-primary, #f8fafc);
+  font-size: 0.8rem;
+  padding: 0 0.4rem;
+  outline: none;
+}
+
+.track-rename-btn {
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm, 4px);
+  font-size: 0.75rem;
+  cursor: pointer;
+  border: 1px solid transparent;
+  padding: 0;
+  transition: all 0.15s ease;
+}
+
+.track-rename-save {
+  background-color: rgba(16, 185, 129, 0.2);
+  color: #34d399;
+  border-color: rgba(16, 185, 129, 0.4);
+}
+
+.track-rename-save:hover:not(:disabled) {
+  background-color: rgba(16, 185, 129, 0.4);
+}
+
+.track-rename-save:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.track-rename-cancel {
+  background-color: rgba(239, 68, 68, 0.2);
+  color: #f87171;
+  border-color: rgba(239, 68, 68, 0.4);
+}
+
+.track-rename-cancel:hover {
+  background-color: rgba(239, 68, 68, 0.4);
+}
+
+/* Track Actions Row */
+.track-actions-group {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.track-action-btn {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+  color: var(--text-muted, #94a3b8);
+  font-size: 0.7rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  line-height: 1;
+}
+
+.track-action-btn:hover:not(:disabled) {
+  background-color: rgba(255, 255, 255, 0.15);
+  color: var(--text-primary, #f8fafc);
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.track-action-btn:disabled,
+.track-delete-disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+  pointer-events: auto;
+}
+
+.track-delete-btn:hover:not(:disabled) {
+  background-color: rgba(239, 68, 68, 0.25);
+  border-color: rgba(239, 68, 68, 0.5);
+  color: #fca5a5;
+}
+
+/* Add Track Dropdown in Toolbar */
+.add-track-dropdown-container {
+  position: relative;
+  display: inline-block;
+}
+
+.add-track-btn {
+  background-color: rgba(56, 189, 248, 0.15);
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  color: #38bdf8;
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 0.35rem 0.65rem;
+  border-radius: var(--radius-sm, 4px);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.add-track-btn:hover {
+  background-color: rgba(56, 189, 248, 0.25);
+  border-color: #38bdf8;
+  color: #7dd3fc;
+}
+
+.add-track-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 200px;
+  background-color: #0f172a;
+  border: 1px solid var(--border-color, #334155);
+  border-radius: var(--radius-md, 6px);
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.6);
+  z-index: 100;
+  overflow: hidden;
+  padding: 0.35rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.add-track-menu-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.45rem 0.65rem;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  cursor: pointer;
+  text-align: left;
+  transition: background-color 0.15s ease;
+  color: var(--text-primary, #f8fafc);
+}
+
+.add-track-menu-item:hover {
+  background-color: rgba(255, 255, 255, 0.08);
+}
+
+.add-track-menu-item .menu-icon {
+  font-size: 1.1rem;
+}
+
+.add-track-menu-item .menu-text {
+  display: flex;
+  flex-direction: column;
+}
+
+.add-track-menu-item .menu-title {
+  font-size: 0.825rem;
+  font-weight: 600;
+  color: var(--text-primary, #f8fafc);
+}
+
+.add-track-menu-item .menu-sub {
+  font-size: 0.7rem;
+  color: var(--text-muted, #94a3b8);
+}
+
+/* Empty Tracks Card */
+.timeline-empty-tracks-card {
+  padding: 2.5rem 1.5rem;
+  text-align: center;
+  background-color: rgba(15, 23, 42, 0.5);
+  border: 2px dashed rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  margin: 1.5rem auto;
+  max-width: 500px;
+}
+
+/* Timeline Tracks Footer Bar */
+.timeline-tracks-footer {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  background-color: rgba(15, 23, 42, 0.4);
+  border-top: 1px dashed rgba(255, 255, 255, 0.08);
+}
+
+.timeline-add-track-footer-btn {
+  background: none;
+  border: 1px dashed rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  color: var(--text-muted, #94a3b8);
+  font-size: 0.75rem;
+  padding: 0.25rem 0.6rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.timeline-add-track-footer-btn:hover {
+  background-color: rgba(255, 255, 255, 0.06);
+  border-color: #38bdf8;
+  color: #38bdf8;
 }
 
 

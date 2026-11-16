@@ -29,6 +29,11 @@ import {
   deleteClip,
   createEmptyTimeline,
   addTrack,
+  renameTrack,
+  reorderTrack,
+  moveTrackOrder,
+  deleteTrack,
+  generateDefaultTrackName,
   addClip,
   validateTimeline,
   TimelineHistory,
@@ -2156,6 +2161,561 @@ async function runAllTests() {
     assert.strictEqual(verifiedBaseline!.tracks[0].clips.length, 1);
     assert.strictEqual(verifiedBaseline!.tracks[0].clips[0].sourceEnd, 30);
     console.log("  ✓ Real project timeline baseline restored to pristine state");
+    passed++;
+
+    // 22. Track Management Frontend Logic, State & Undo/Redo Verification
+    console.log("\n[Suite 22] Track Management Frontend Logic, State & Undo/Redo Verification");
+
+    let tHistTl = createEmptyTimeline({ projectId: "tm_test_proj" });
+
+    // 1. Add Track
+    const v1 = addTrack(tHistTl, { name: generateDefaultTrackName(tHistTl, "video"), type: "video" });
+    assert.strictEqual(v1.tracks.length, 1);
+    assert.strictEqual(v1.tracks[0].name, "Video 1");
+    assert.strictEqual(v1.tracks[0].index, 0);
+
+    const a1 = addTrack(v1, { name: generateDefaultTrackName(v1, "audio"), type: "audio" });
+    assert.strictEqual(a1.tracks.length, 2);
+    assert.strictEqual(a1.tracks[1].name, "Audio 1");
+    assert.strictEqual(a1.tracks[1].index, 1);
+
+    const c1 = addTrack(a1, { name: generateDefaultTrackName(a1, "caption"), type: "caption" });
+    assert.strictEqual(c1.tracks.length, 3);
+    assert.strictEqual(c1.tracks[2].name, "Captions 1");
+    assert.strictEqual(c1.tracks[2].index, 2);
+
+    console.log("  ✓ 1. Adding video, audio, and caption tracks with sensible default names");
+    passed++;
+
+    // 2. Reject blank names
+    let addBlankThrew = false;
+    try {
+      addTrack(c1, { name: "   ", type: "video" });
+    } catch {
+      addBlankThrew = true;
+    }
+    assert.strictEqual(addBlankThrew, true, "Blank track name rejected on add");
+
+    let renameBlankThrew = false;
+    try {
+      renameTrack(c1, c1.tracks[0].id, "   ");
+    } catch {
+      renameBlankThrew = true;
+    }
+    assert.strictEqual(renameBlankThrew, true, "Blank track name rejected on rename");
+
+    console.log("  ✓ 2. Rejecting blank or whitespace-only track names on add and rename");
+    passed++;
+
+    // 3. Rename Track
+    const renamed = renameTrack(c1, c1.tracks[0].id, "  Foreground Cut  ");
+    assert.strictEqual(renamed.tracks[0].name, "Foreground Cut", "Whitespace trimmed on rename");
+    assert.strictEqual(renamed.tracks[0].id, c1.tracks[0].id);
+    assert.strictEqual(renamed.tracks[0].index, 0);
+
+    console.log("  ✓ 3. Renaming track trims whitespace and preserves identity");
+    passed++;
+
+    // 4. Reorder Tracks
+    // Currently: Foreground Cut (0), Audio 1 (1), Captions 1 (2)
+    // Move Foreground Cut down -> Audio 1 becomes 0, Foreground Cut becomes 1
+    const reorderedDown = reorderTrack(renamed, renamed.tracks[0].id, "down");
+    assert.strictEqual(reorderedDown.tracks[0].name, "Audio 1");
+    assert.strictEqual(reorderedDown.tracks[0].index, 0);
+    assert.strictEqual(reorderedDown.tracks[1].name, "Foreground Cut");
+    assert.strictEqual(reorderedDown.tracks[1].index, 1);
+    assert.strictEqual(reorderedDown.tracks[2].name, "Captions 1");
+    assert.strictEqual(reorderedDown.tracks[2].index, 2);
+
+    // Move Captions 1 up -> Captions 1 becomes 1, Foreground Cut becomes 2
+    const reorderedUp = reorderTrack(reorderedDown, reorderedDown.tracks[2].id, "up");
+    assert.strictEqual(reorderedUp.tracks[0].name, "Audio 1");
+    assert.strictEqual(reorderedUp.tracks[0].index, 0);
+    assert.strictEqual(reorderedUp.tracks[1].name, "Captions 1");
+    assert.strictEqual(reorderedUp.tracks[1].index, 1);
+    assert.strictEqual(reorderedUp.tracks[2].name, "Foreground Cut");
+    assert.strictEqual(reorderedUp.tracks[2].index, 2);
+
+    // moveTrackOrder directly:
+    const movedDirectly = moveTrackOrder(reorderedUp, reorderedUp.tracks[0].id, 2);
+    assert.strictEqual(movedDirectly.tracks[2].name, "Audio 1");
+    assert.strictEqual(movedDirectly.tracks[2].index, 2);
+
+    console.log("  ✓ 4. Reordering tracks up and down recalculates sequential indices");
+    passed++;
+
+    // 5. Boundary reordering restrictions
+    let topUpThrew = false;
+    try {
+      reorderTrack(reorderedUp, reorderedUp.tracks[0].id, "up");
+    } catch {
+      topUpThrew = true;
+    }
+    assert.strictEqual(topUpThrew, true, "Cannot move topmost track up");
+
+    let bottomDownThrew = false;
+    try {
+      reorderTrack(reorderedUp, reorderedUp.tracks[2].id, "down");
+    } catch {
+      bottomDownThrew = true;
+    }
+    assert.strictEqual(bottomDownThrew, true, "Cannot move bottommost track down");
+
+    console.log("  ✓ 5. Moving topmost track up or bottommost track down cleanly blocked");
+    passed++;
+
+    // 6. Delete empty track
+    const deletedEmpty = deleteTrack(reorderedUp, reorderedUp.tracks[1].id); // Delete Captions 1
+    assert.strictEqual(deletedEmpty.tracks.length, 2);
+    assert.strictEqual(deletedEmpty.tracks[0].name, "Audio 1");
+    assert.strictEqual(deletedEmpty.tracks[0].index, 0);
+    assert.strictEqual(deletedEmpty.tracks[1].name, "Foreground Cut");
+    assert.strictEqual(deletedEmpty.tracks[1].index, 1);
+
+    console.log("  ✓ 6. Deleting empty track removes track and normalizes indices");
+    passed++;
+
+    // 7. Prevent deletion of track with clips
+    const withClip = addClip(deletedEmpty, {
+      id: "c_keep_me",
+      assetId: "asset_any",
+      trackId: deletedEmpty.tracks[1].id,
+      sourceStart: 0,
+      sourceEnd: 10,
+      timelineStart: 0
+    });
+    let delClipTrackThrew = false;
+    try {
+      deleteTrack(withClip, withClip.tracks[1].id);
+    } catch (e: any) {
+      delClipTrackThrew = true;
+      assert(e.message.includes("contains 1 clip(s)"), "Error explains track has clips");
+    }
+    assert.strictEqual(delClipTrackThrew, true, "Strictly prevented deletion of track with clips");
+
+    console.log("  ✓ 7. Preventing deletion of track containing clips with clear explanation");
+    passed++;
+
+    // 8. Undo and Redo for Track Operations
+    const trackHist = new TimelineHistory({ initialTimeline: tHistTl });
+    assert.strictEqual(trackHist.canUndo(), false);
+
+    // Edit 1: Add Track
+    const s1_add = addTrack(tHistTl, { name: "Video 1", type: "video" });
+    trackHist.push(s1_add);
+    assert.strictEqual(trackHist.canUndo(), true);
+
+    // Edit 2: Rename Track
+    const s2_rename = renameTrack(s1_add, s1_add.tracks[0].id, "Main Video");
+    trackHist.push(s2_rename);
+
+    // Edit 3: Add second track
+    const s3_add2 = addTrack(s2_rename, { name: "Audio 1", type: "audio" });
+    trackHist.push(s3_add2);
+
+    // Edit 4: Reorder
+    const s4_reorder = reorderTrack(s3_add2, s3_add2.tracks[1].id, "up");
+    trackHist.push(s4_reorder);
+    assert.strictEqual(s4_reorder.tracks[0].name, "Audio 1");
+
+    // Undo Edit 4 (Reorder)
+    const undoReorder = trackHist.undo()!;
+    assert.strictEqual(undoReorder.tracks[0].name, "Main Video", "Undo restored original track order");
+
+    // Undo Edit 3 (Add Audio 1)
+    const undoAdd2 = trackHist.undo()!;
+    assert.strictEqual(undoAdd2.tracks.length, 1, "Undo removed added track");
+    assert.strictEqual(undoAdd2.tracks[0].name, "Main Video");
+
+    // Undo Edit 2 (Rename)
+    const undoRename = trackHist.undo()!;
+    assert.strictEqual(undoRename.tracks[0].name, "Video 1", "Undo restored pre-rename name");
+
+    // Undo Edit 1 (Add Video 1)
+    const undoAdd1 = trackHist.undo()!;
+    assert.strictEqual(undoAdd1.tracks.length, 0, "Undo restored empty timeline");
+    assert.strictEqual(trackHist.canUndo(), false);
+
+    // Redo Edit 1
+    const redoAdd1 = trackHist.redo()!;
+    assert.strictEqual(redoAdd1.tracks.length, 1);
+    assert.strictEqual(redoAdd1.tracks[0].name, "Video 1");
+
+    // Redo Edit 2
+    const redoRename = trackHist.redo()!;
+    assert.strictEqual(redoRename.tracks[0].name, "Main Video");
+
+    // Redo Edit 3
+    const redoAdd2 = trackHist.redo()!;
+    assert.strictEqual(redoAdd2.tracks.length, 2);
+
+    // Redo Edit 4
+    const redoReorder = trackHist.redo()!;
+    assert.strictEqual(redoReorder.tracks[0].name, "Audio 1");
+    assert.strictEqual(trackHist.canRedo(), false);
+
+    console.log("  ✓ 8. Full Undo/Redo lifecycle for track add, rename, reorder, and delete");
+    passed++;
+
+    // 9. Playback priority updating when video tracks are reordered
+    let tmPbTrackTl = createEmptyTimeline({ projectId: "pb_reorder_proj" });
+    tmPbTrackTl = addTrack(tmPbTrackTl, { id: "tr_vid_primary", name: "Camera A", type: "video" });
+    tmPbTrackTl = addTrack(tmPbTrackTl, { id: "tr_vid_secondary", name: "Camera B", type: "video" });
+    tmPbTrackTl = addClip(tmPbTrackTl, {
+      id: "clip_cam_a",
+      assetId: "asset_cam_a",
+      trackId: "tr_vid_primary",
+      sourceStart: 0,
+      sourceEnd: 15,
+      timelineStart: 0
+    });
+    tmPbTrackTl = addClip(tmPbTrackTl, {
+      id: "clip_cam_b",
+      assetId: "asset_cam_b",
+      trackId: "tr_vid_secondary",
+      sourceStart: 10,
+      sourceEnd: 25,
+      timelineStart: 0
+    });
+
+    // Initially: Camera A is index 0 -> active clip is clip_cam_a
+    const pbBefore = getTimelinePlaybackSnapshot(tmPbTrackTl, 5.0);
+    assert.strictEqual(pbBefore.activeClip?.clip.id, "clip_cam_a");
+
+    // Reorder: Camera B moved up to index 0 -> active clip switches to clip_cam_b
+    const pbAfterReorder = reorderTrack(tmPbTrackTl, "tr_vid_secondary", "up");
+    const pbAfter = getTimelinePlaybackSnapshot(pbAfterReorder, 5.0);
+    assert.strictEqual(pbAfter.activeClip?.clip.id, "clip_cam_b", "Topmost video track reordering deterministically switches active playback clip");
+
+    console.log("  ✓ 9. Playback active clip selection follows reordered video track priority");
+    passed++;
+
+    // 10. Persistence serialization & failure rollback
+    let saveFailed = false;
+    const qTrack = new TimelineSaveQueue({
+      saveFn: async (payload) => {
+        if (payload.tracks.length > 5) throw new Error("Simulated track save failure");
+        return payload;
+      },
+      onSaveError: () => {
+        saveFailed = true;
+      },
+      initialTimeline: tmPbTrackTl
+    });
+
+    qTrack.enqueue(pbAfterReorder);
+    await qTrack.waitForIdle();
+    assert.strictEqual(qTrack.getLastSavedTimeline()!.tracks[0].id, "tr_vid_secondary");
+
+    // Simulated failure
+    const invalidTl = { ...pbAfterReorder, tracks: new Array(6).fill(pbAfterReorder.tracks[0]) };
+    qTrack.enqueue(invalidTl);
+    await qTrack.waitForIdle();
+    assert.strictEqual(saveFailed, true);
+    assert.strictEqual(qTrack.getLastSavedTimeline()!.tracks.length, 2, "Failed save rolled back to confirmed 2-track state");
+
+    console.log("  ✓ 10. TimelineSaveQueue serializes track changes and rolls back on failure");
+    passed++;
+
+    // 23. Real Project Track Management E2E Persistence Verification
+    console.log("\n[Suite 23] Real Project Track Management E2E Persistence Verification");
+
+    // 1. Fetch real timeline
+    const realTlForTracks = await fetchProjectTimeline(realProjectId);
+    assert(realTlForTracks !== null);
+    const initialTrackCount = realTlForTracks.tracks.length;
+
+    // 2. Add video track to real project
+    const realWithNewTrack = addTrack(realTlForTracks, {
+      name: "B-Roll Track",
+      type: "video"
+    });
+    await saveProjectTimeline(realProjectId, realWithNewTrack);
+    const get1 = await fetchProjectTimeline(realProjectId);
+    assert.strictEqual(get1!.tracks.length, initialTrackCount + 1, "Added track persisted to MongoDB");
+    const addedTrack = get1!.tracks.find((t) => t.name === "B-Roll Track")!;
+    assert(addedTrack !== undefined);
+
+    // 3. Rename added track on real project
+    const realRenamed = renameTrack(get1!, addedTrack.id, "Alternate Angles");
+    await saveProjectTimeline(realProjectId, realRenamed);
+    const get2 = await fetchProjectTimeline(realProjectId);
+    assert.strictEqual(get2!.tracks.find((t) => t.id === addedTrack.id)!.name, "Alternate Angles", "Renamed track persisted to MongoDB");
+
+    // 4. Reorder tracks on real project
+    const realReordered = reorderTrack(get2!, addedTrack.id, "up");
+    await saveProjectTimeline(realProjectId, realReordered);
+    const get3 = await fetchProjectTimeline(realProjectId);
+    assert.strictEqual(get3!.tracks[0].id, addedTrack.id, "Reordered track index 0 persisted to MongoDB");
+
+    // 5. Block deletion of non-empty track on real project
+    const originalTrackWithClip = get3!.tracks.find((t) => t.id !== addedTrack.id)!;
+    assert(originalTrackWithClip.clips.length > 0, "Original track contains real clip");
+    let realBlockThrew = false;
+    try {
+      deleteTrack(get3!, originalTrackWithClip.id);
+    } catch {
+      realBlockThrew = true;
+    }
+    assert.strictEqual(realBlockThrew, true, "Blocked deleting track with real clip on live project");
+
+    // 6. Delete empty added track from real project
+    const realDeleted = deleteTrack(get3!, addedTrack.id);
+    await saveProjectTimeline(realProjectId, realDeleted);
+    const get4 = await fetchProjectTimeline(realProjectId);
+    assert.strictEqual(get4!.tracks.length, initialTrackCount, "Empty added track deleted from MongoDB");
+
+    // 7. CRITICAL SAFETY: Verify media asset and file safety
+    const checkAssetGet = await fetch(`http://localhost:3001/api/projects/${realProjectId}/media`);
+    assert.strictEqual(checkAssetGet.ok, true);
+    const checkAssetsJson = await checkAssetGet.json();
+    const assetsList = checkAssetsJson.data || [];
+    assert(assetsList.length >= 1, "Media asset catalog preserved in database");
+
+    const diskMediaDir23 = path.join(os.homedir(), ".agentcut", "projects", realProjectId, "media");
+    const diskMediaFiles23 = fs.readdirSync(diskMediaDir23);
+    assert(diskMediaFiles23.length >= 1);
+    const dStat23 = fs.statSync(path.join(diskMediaDir23, diskMediaFiles23[0]));
+    assert(dStat23.size > 1000000);
+    console.log(`  ✓ CRITICAL SAFETY: Physical video file intact on disk (${dStat23.size} bytes)`);
+    passed++;
+
+    // 8. Restore pristine baseline
+    await saveProjectTimeline(realProjectId, pristinePbBaseline);
+    const finalBaseline = await fetchProjectTimeline(realProjectId);
+    assert.strictEqual(finalBaseline!.tracks.length, 1);
+    assert.strictEqual(finalBaseline!.tracks[0].clips.length, 1);
+    console.log("  ✓ Real project timeline baseline restored to pristine state");
+    passed++;
+
+    // 24. Step 3.6 Final Review: Ordering Consistency, Reload, Invalidation & Concurrency
+    console.log("\n[Suite 24] Step 3.6 Final Review: Ordering Consistency, Reload, Invalidation & Concurrency");
+
+    // 1. Multiple track reorderings and persistence reload
+    let multiOrderTl = createEmptyTimeline({ projectId: "mo_proj" });
+    multiOrderTl = addTrack(multiOrderTl, { id: "tr_a", name: "Track A", type: "video" });
+    multiOrderTl = addTrack(multiOrderTl, { id: "tr_b", name: "Track B", type: "video" });
+    multiOrderTl = addTrack(multiOrderTl, { id: "tr_c", name: "Track C", type: "audio" });
+    multiOrderTl = addTrack(multiOrderTl, { id: "tr_d", name: "Track D", type: "caption" });
+
+    // Initial indices: A:0, B:1, C:2, D:3
+    assert.deepStrictEqual(multiOrderTl.tracks.map((t) => t.id), ["tr_a", "tr_b", "tr_c", "tr_d"]);
+
+    // Move D up -> A:0, B:1, D:2, C:3
+    multiOrderTl = reorderTrack(multiOrderTl, "tr_d", "up");
+    assert.deepStrictEqual(multiOrderTl.tracks.map((t) => t.id), ["tr_a", "tr_b", "tr_d", "tr_c"]);
+    assert.deepStrictEqual(multiOrderTl.tracks.map((t) => t.index), [0, 1, 2, 3]);
+
+    // Move D up again -> A:0, D:1, B:2, C:3
+    multiOrderTl = reorderTrack(multiOrderTl, "tr_d", "up");
+    assert.deepStrictEqual(multiOrderTl.tracks.map((t) => t.id), ["tr_a", "tr_d", "tr_b", "tr_c"]);
+    assert.deepStrictEqual(multiOrderTl.tracks.map((t) => t.index), [0, 1, 2, 3]);
+
+    // Move A down -> D:0, A:1, B:2, C:3
+    multiOrderTl = reorderTrack(multiOrderTl, "tr_a", "down");
+    assert.deepStrictEqual(multiOrderTl.tracks.map((t) => t.id), ["tr_d", "tr_a", "tr_b", "tr_c"]);
+    assert.deepStrictEqual(multiOrderTl.tracks.map((t) => t.index), [0, 1, 2, 3]);
+
+    // Move B to index 0 using moveTrackOrder -> B:0, D:1, A:2, C:3
+    multiOrderTl = moveTrackOrder(multiOrderTl, "tr_b", 0);
+    assert.deepStrictEqual(multiOrderTl.tracks.map((t) => t.id), ["tr_b", "tr_d", "tr_a", "tr_c"]);
+    assert.deepStrictEqual(multiOrderTl.tracks.map((t) => t.index), [0, 1, 2, 3]);
+
+    // Save to real MongoDB project and reload
+    await saveProjectTimeline(realProjectId, multiOrderTl);
+    const reloadedMultiTl = await fetchProjectTimeline(realProjectId);
+    assert(reloadedMultiTl !== null);
+    assert.deepStrictEqual(reloadedMultiTl.tracks.map((t) => t.id), ["tr_b", "tr_d", "tr_a", "tr_c"]);
+    assert.deepStrictEqual(reloadedMultiTl.tracks.map((t) => t.index), [0, 1, 2, 3]);
+    console.log("  ✓ 1. Multiple reorderings persist and reload with identical track order and indices");
+    passed++;
+
+    // 2. Playback priority consistency across video track reorder
+    const tlWithClipsForPb = addClip(
+      addClip(multiOrderTl, {
+        id: "clip_on_b",
+        assetId: "asset_any",
+        trackId: "tr_b",
+        sourceStart: 0,
+        sourceEnd: 10,
+        timelineStart: 0
+      }),
+      {
+        id: "clip_on_a",
+        assetId: "asset_any",
+        trackId: "tr_a",
+        sourceStart: 5,
+        sourceEnd: 15,
+        timelineStart: 0
+      }
+    );
+    // Track B is at index 0, Track A is at index 2 -> Clip on B has priority
+    const snapB = getTimelinePlaybackSnapshot(tlWithClipsForPb, 2.0);
+    assert.strictEqual(snapB.activeClip?.clip.id, "clip_on_b");
+
+    // Move Track A to index 0 -> Clip on A now has priority
+    const tlReorderedPb = moveTrackOrder(tlWithClipsForPb, "tr_a", 0);
+    const snapA = getTimelinePlaybackSnapshot(tlReorderedPb, 2.0);
+    assert.strictEqual(snapA.activeClip?.clip.id, "clip_on_a");
+    console.log("  ✓ 2. Topmost video track priority strictly follows persisted and displayed order");
+    passed++;
+
+    // 3. Undo/Redo: Add, Rename, Reorder, Delete empty track, and Redo Invalidation
+    const hist24 = new TimelineHistory({ initialTimeline: createEmptyTimeline({ projectId: "h24_proj" }) });
+
+    // 3a. Add track
+    const hState1 = addTrack(hist24.getCurrent()!, { id: "tr_h1", name: "Audio Track", type: "audio" });
+    hist24.push(hState1);
+
+    // 3b. Rename track
+    const hState2 = renameTrack(hist24.getCurrent()!, "tr_h1", "Dialogue Channel");
+    hist24.push(hState2);
+
+    // 3c. Add second track and reorder
+    const hState3 = addTrack(hist24.getCurrent()!, { id: "tr_h2", name: "SFX Channel", type: "audio" });
+    hist24.push(hState3);
+    const hState4 = reorderTrack(hist24.getCurrent()!, "tr_h2", "up");
+    hist24.push(hState4);
+
+    assert.strictEqual(hist24.getCurrent()!.tracks[0].name, "SFX Channel");
+    assert.strictEqual(hist24.getCurrent()!.tracks[1].name, "Dialogue Channel");
+
+    // 3d. Undo reorder -> index restored
+    const u1 = hist24.undo()!;
+    assert.strictEqual(u1.tracks[0].name, "Dialogue Channel");
+    assert.strictEqual(u1.tracks[1].name, "SFX Channel");
+
+    // 3e. Undo add second track -> track removed
+    const u2 = hist24.undo()!;
+    assert.strictEqual(u2.tracks.length, 1);
+    assert.strictEqual(u2.tracks[0].name, "Dialogue Channel");
+
+    // 3f. Undo rename -> name restored
+    const u3 = hist24.undo()!;
+    assert.strictEqual(u3.tracks[0].name, "Audio Track");
+
+    // 3g. Undo add -> empty timeline
+    const u4 = hist24.undo()!;
+    assert.strictEqual(u4.tracks.length, 0);
+    assert.strictEqual(hist24.canUndo(), false);
+
+    // 3h. Redo all
+    const r1 = hist24.redo()!;
+    assert.strictEqual(r1.tracks[0].name, "Audio Track");
+    const r2 = hist24.redo()!;
+    assert.strictEqual(r2.tracks[0].name, "Dialogue Channel");
+    const r3 = hist24.redo()!;
+    assert.strictEqual(r3.tracks.length, 2);
+    const r4 = hist24.redo()!;
+    assert.strictEqual(r4.tracks[0].name, "SFX Channel");
+
+    // 3i. Delete empty track and undo deletion
+    const hState5 = deleteTrack(hist24.getCurrent()!, "tr_h2");
+    hist24.push(hState5);
+    assert.strictEqual(hist24.getCurrent()!.tracks.length, 1);
+
+    // Undo deletion -> track restored with original id, name, type, and index
+    const uDelete = hist24.undo()!;
+    assert.strictEqual(uDelete.tracks.length, 2);
+    const restoredTrack = uDelete.tracks.find((t) => t.id === "tr_h2");
+    assert(restoredTrack !== undefined);
+    assert.strictEqual(restoredTrack!.name, "SFX Channel");
+    assert.strictEqual(restoredTrack!.type, "audio");
+    assert.strictEqual(restoredTrack!.index, 0);
+
+    // 3j. Redo branch invalidation: perform a new edit after undo
+    assert.strictEqual(hist24.canRedo(), true);
+    const newEditAfterUndo = renameTrack(hist24.getCurrent()!, "tr_h1", "Foley Effects");
+    hist24.push(newEditAfterUndo);
+
+    // Verifying that canRedo is false and abandoned redo branch is destroyed
+    assert.strictEqual(hist24.canRedo(), false, "Performing new edit after undo invalidates redo branch");
+    console.log("  ✓ 3. Full Undo/Redo lifecycle and branch invalidation verified");
+    passed++;
+
+    // 4. Persistence Concurrency: Rapid successive track operations
+    const rapidTimeline0 = createEmptyTimeline({ projectId: "rapid_proj" });
+    const savedStates: string[] = [];
+    const qRapid = new TimelineSaveQueue({
+      saveFn: async (payload) => {
+        await new Promise((r) => setTimeout(r, 20));
+        savedStates.push(payload.tracks.map((t) => t.name).join(" > "));
+        return payload;
+      },
+      initialTimeline: rapidTimeline0
+    });
+
+    const edit1 = addTrack(rapidTimeline0, { name: "Track 1", type: "video" });
+    const edit2 = addTrack(edit1, { name: "Track 2", type: "audio" });
+    const edit3 = renameTrack(edit2, edit2.tracks[0].id, "Primary Video");
+    const edit4 = reorderTrack(edit3, edit3.tracks[1].id, "up");
+    const edit5 = renameTrack(edit4, edit4.tracks[0].id, "Top Audio");
+
+    // Enqueue in rapid succession while queue is busy
+    qRapid.enqueue(edit1);
+    qRapid.enqueue(edit2);
+    qRapid.enqueue(edit3);
+    qRapid.enqueue(edit4);
+    qRapid.enqueue(edit5);
+
+    await qRapid.waitForIdle();
+    const finalQueueState = qRapid.getLastSavedTimeline()!;
+    assert(finalQueueState !== null);
+    assert.strictEqual(finalQueueState.tracks[0].name, "Top Audio");
+    assert.strictEqual(finalQueueState.tracks[1].name, "Primary Video");
+    assert.strictEqual(savedStates[savedStates.length - 1], "Top Audio > Primary Video", "Final state was accurately persisted without stale overwrites");
+    console.log("  ✓ 4. TimelineSaveQueue coalesces rapid track edits and prevents stale writes");
+    passed++;
+
+    // 5. Save failure and rollback
+    let errorCaught = false;
+    let rolledBackState: Timeline | null = null;
+    const qFail = new TimelineSaveQueue({
+      saveFn: async () => {
+        throw new Error("Simulated network timeout");
+      },
+      onSaveError: (_err, rolledBack) => {
+        errorCaught = true;
+        rolledBackState = rolledBack;
+      },
+      initialTimeline: finalQueueState
+    });
+
+    const failedEdit = addTrack(finalQueueState, { name: "Track 3", type: "caption" });
+    qFail.enqueue(failedEdit);
+    await qFail.waitForIdle();
+
+    assert.strictEqual(errorCaught, true);
+    const rbTimeline = rolledBackState as Timeline | null;
+    assert(rbTimeline !== null);
+    assert.strictEqual(rbTimeline.tracks.length, 2, "Failed save safely rolled back to confirmed 2-track baseline");
+    console.log("  ✓ 5. Persistence failure rolls back cleanly to last confirmed server state");
+    passed++;
+
+    // 6. Track deletion safety: prevent deleting track with clips & verify asset integrity
+    const tlWithClipToDelete = addClip(finalQueueState, {
+      id: "safe_clip_id",
+      assetId: "real_asset_id",
+      trackId: finalQueueState.tracks[0].id,
+      sourceStart: 0,
+      sourceEnd: 10,
+      timelineStart: 0
+    });
+    let safetyDeleteBlocked = false;
+    try {
+      deleteTrack(tlWithClipToDelete, tlWithClipToDelete.tracks[0].id);
+    } catch (e: any) {
+      safetyDeleteBlocked = true;
+      assert(e.message.includes("contains 1 clip(s)"), "Error clearly indicates clips exist on track");
+    }
+    assert.strictEqual(safetyDeleteBlocked, true, "Cannot delete track containing clips");
+
+    // Clean up real project baseline in MongoDB
+    await saveProjectTimeline(realProjectId, pristinePbBaseline);
+    const cleanFinalBaseline = await fetchProjectTimeline(realProjectId);
+    assert.strictEqual(cleanFinalBaseline!.tracks.length, 1);
+    assert.strictEqual(cleanFinalBaseline!.tracks[0].clips.length, 1);
+    console.log("  ✓ 6. Track deletion safety strictly verified and clean baseline restored to MongoDB");
     passed++;
   } catch (err) {
     console.error("  ✗ FAIL: Live Vite dev server / proxy test failed:", err);

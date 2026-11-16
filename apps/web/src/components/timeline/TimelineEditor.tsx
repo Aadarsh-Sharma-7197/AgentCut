@@ -1,11 +1,16 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import type { Timeline, MediaAsset, Clip, Track } from "@agentcut/shared";
+import type { Timeline, MediaAsset, Clip, Track, TrackType } from "@agentcut/shared";
 import {
   getTimelineDuration,
   moveClip,
   splitClipWithResult,
   trimClip,
   deleteClip,
+  addTrack,
+  renameTrack,
+  reorderTrack,
+  deleteTrack,
+  generateDefaultTrackName,
   TimelineHistory
 } from "@agentcut/shared";
 import { fetchProjectTimeline, saveProjectTimeline } from "../../api/timeline";
@@ -328,6 +333,112 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
       setTimeout(() => setNoticeMessage(null), 3500);
     }
   }, [timeline, selectedClipId, mediaAssets, persistTimeline, updateHistoryFlags]);
+
+  // Track Management Handlers
+  const handleAddTrack = useCallback(
+    (type: TrackType) => {
+      if (!timeline) return;
+      setIsPlaying(false);
+      try {
+        const defaultName = generateDefaultTrackName(timeline, type);
+        const updated = addTrack(
+          timeline,
+          { name: defaultName, type },
+          { assets: mediaAssets }
+        );
+
+        historyRef.current.push(updated);
+        updateHistoryFlags();
+        persistTimeline(updated);
+        setNoticeMessage(null);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Failed to add track.";
+        setNoticeMessage(msg);
+        setTimeout(() => setNoticeMessage(null), 3500);
+      }
+    },
+    [timeline, mediaAssets, persistTimeline, updateHistoryFlags]
+  );
+
+  const handleRenameTrack = useCallback(
+    (trackId: string, newName: string) => {
+      if (!timeline) return;
+      setIsPlaying(false);
+      try {
+        const updated = renameTrack(
+          timeline,
+          trackId,
+          newName,
+          { assets: mediaAssets }
+        );
+
+        historyRef.current.push(updated);
+        updateHistoryFlags();
+        persistTimeline(updated);
+        setNoticeMessage(null);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Failed to rename track.";
+        setNoticeMessage(msg);
+        setTimeout(() => setNoticeMessage(null), 3500);
+      }
+    },
+    [timeline, mediaAssets, persistTimeline, updateHistoryFlags]
+  );
+
+  const handleMoveTrack = useCallback(
+    (trackId: string, direction: "up" | "down") => {
+      if (!timeline) return;
+      setIsPlaying(false);
+      try {
+        const updated = reorderTrack(
+          timeline,
+          trackId,
+          direction,
+          { assets: mediaAssets }
+        );
+
+        historyRef.current.push(updated);
+        updateHistoryFlags();
+        persistTimeline(updated);
+        setNoticeMessage(null);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Failed to move track.";
+        setNoticeMessage(msg);
+        setTimeout(() => setNoticeMessage(null), 3500);
+      }
+    },
+    [timeline, mediaAssets, persistTimeline, updateHistoryFlags]
+  );
+
+  const handleDeleteTrack = useCallback(
+    (trackId: string) => {
+      if (!timeline) return;
+      setIsPlaying(false);
+
+      const targetTrack = timeline.tracks.find((t) => t.id === trackId);
+      if (targetTrack && targetTrack.clips.length > 0) {
+        setNoticeMessage(
+          `Cannot delete track "${targetTrack.name}": it contains ${targetTrack.clips.length} clip(s). Remove or move the clips first.`
+        );
+        setTimeout(() => setNoticeMessage(null), 4500);
+        return;
+      }
+
+      try {
+        const updated = deleteTrack(timeline, trackId, { assets: mediaAssets });
+
+        historyRef.current.push(updated);
+        updateHistoryFlags();
+        persistTimeline(updated);
+        setNoticeMessage(null);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Failed to delete track.";
+        setNoticeMessage(msg);
+        setTimeout(() => setNoticeMessage(null), 3500);
+      }
+    },
+    [timeline, mediaAssets, persistTimeline, updateHistoryFlags]
+  );
 
   // Keyboard shortcuts:
   // - Space to play/pause
@@ -728,6 +839,7 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
           onSplit={handleSplitClip}
           canDelete={Boolean(selectedClipId)}
           onDelete={handleDeleteSelectedClip}
+          onAddTrack={handleAddTrack}
           onZoomChange={setZoom}
           onResetZoom={handleResetZoom}
         />
@@ -819,7 +931,7 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
         <TimelinePlayhead
           currentTime={currentTime}
           pps={pps}
-          headerWidth={190}
+          headerWidth={200}
         />
 
         {/* Time Ruler */}
@@ -834,36 +946,98 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
         {/* Track Rows */}
         <div className="timeline-tracks-wrapper">
           {timeline.tracks.length === 0 ? (
-            <div style={{ padding: "2rem", textAlign: "center", color: "var(--text-muted)", fontStyle: "italic" }}>
-              This timeline has no tracks yet.
+            <div className="timeline-empty-tracks-card">
+              <div style={{ fontSize: "1.75rem", marginBottom: "0.5rem" }}>🎬</div>
+              <div style={{ fontWeight: 600, color: "var(--text-primary)", marginBottom: "0.25rem" }}>
+                No Tracks on Timeline
+              </div>
+              <div style={{ color: "var(--text-muted)", fontSize: "0.85rem", marginBottom: "1rem" }}>
+                Add a video, audio, or caption track to start editing
+              </div>
+              <div style={{ display: "flex", gap: "0.5rem", justifyContent: "center" }}>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => handleAddTrack("video")}
+                >
+                  ＋ Video Track
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => handleAddTrack("audio")}
+                >
+                  ＋ Audio Track
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => handleAddTrack("caption")}
+                >
+                  ＋ Caption Track
+                </button>
+              </div>
             </div>
           ) : (
-            timeline.tracks.map((track) => {
-              const isDropTarget = dragState?.hasMoved && dragState.targetTrackId === track.id;
-              return (
-                <TimelineTrack
-                  key={track.id}
-                  track={track}
-                  pps={pps}
-                  timelineWidth={timelineWidth}
-                  assetNames={assetNames}
-                  selectedClipId={selectedClipId}
-                  draggedClipId={dragState?.hasMoved ? dragState.clip.id : null}
-                  draggedTimelineStart={
-                    dragState?.hasMoved ? dragState.currentTimelineStart : undefined
-                  }
-                  trimClipId={trimState?.clip.id || null}
-                  trimPreviewClip={trimState?.previewClip}
-                  isCurrentDropTarget={Boolean(isDropTarget)}
-                  isDropCompatible={dragState ? dragState.isCompatible : true}
-                  onSeek={handleSeek}
-                  onSelectClip={handleSelectClip}
-                  onDeselect={handleDeselect}
-                  onClipDragStart={handleClipDragStart}
-                  onClipTrimStart={handleClipTrimStart}
-                />
-              );
-            })
+            <>
+              {timeline.tracks.map((track, trackIdx) => {
+                const isDropTarget = dragState?.hasMoved && dragState.targetTrackId === track.id;
+                return (
+                  <TimelineTrack
+                    key={track.id}
+                    track={track}
+                    pps={pps}
+                    timelineWidth={timelineWidth}
+                    assetNames={assetNames}
+                    selectedClipId={selectedClipId}
+                    draggedClipId={dragState?.hasMoved ? dragState.clip.id : null}
+                    draggedTimelineStart={
+                      dragState?.hasMoved ? dragState.currentTimelineStart : undefined
+                    }
+                    trimClipId={trimState?.clip.id || null}
+                    trimPreviewClip={trimState?.previewClip}
+                    isCurrentDropTarget={Boolean(isDropTarget)}
+                    isDropCompatible={dragState ? dragState.isCompatible : true}
+                    isFirstTrack={trackIdx === 0}
+                    isLastTrack={trackIdx === timeline.tracks.length - 1}
+                    onSeek={handleSeek}
+                    onSelectClip={handleSelectClip}
+                    onDeselect={handleDeselect}
+                    onClipDragStart={handleClipDragStart}
+                    onClipTrimStart={handleClipTrimStart}
+                    onRenameTrack={handleRenameTrack}
+                    onMoveTrack={handleMoveTrack}
+                    onDeleteTrack={handleDeleteTrack}
+                  />
+                );
+              })}
+              <div className="timeline-tracks-footer">
+                <button
+                  type="button"
+                  className="timeline-add-track-footer-btn"
+                  onClick={() => handleAddTrack("video")}
+                  title="Add another video track"
+                >
+                  ＋ Add Video Track
+                </button>
+                <button
+                  type="button"
+                  className="timeline-add-track-footer-btn"
+                  onClick={() => handleAddTrack("audio")}
+                  title="Add another audio track"
+                >
+                  ＋ Add Audio Track
+                </button>
+                <button
+                  type="button"
+                  className="timeline-add-track-footer-btn"
+                  onClick={() => handleAddTrack("caption")}
+                  title="Add another caption track"
+                >
+                  ＋ Add Caption Track
+                </button>
+              </div>
+            </>
           )}
         </div>
       </div>

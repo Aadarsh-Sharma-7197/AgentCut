@@ -10,7 +10,7 @@ interface TimelinePlayheadProps {
 export const TimelinePlayhead: React.FC<TimelinePlayheadProps> = ({
   currentTime,
   pps,
-  headerWidth = 190
+  headerWidth = 200
 }) => {
   const pixelPosition = headerWidth + timeToPixels(currentTime, pps);
 
