@@ -8,7 +8,9 @@ import {
   streamMediaHandler,
   requestAudioExtractionHandler,
   getAudioExtractionHandler,
-  streamAudioExtractionHandler
+  streamAudioExtractionHandler,
+  detectSilenceHandler,
+  getSilenceDetectionHandler
 } from "../controllers/media.controller.js";
 
 export const mediaRouter = Router({ mergeParams: true });
@@ -39,3 +41,10 @@ mediaRouter.post("/:assetId/audio/extract", requestAudioExtractionHandler);
 mediaRouter.post("/:assetId/audio", requestAudioExtractionHandler);
 mediaRouter.get("/:assetId/audio", getAudioExtractionHandler);
 mediaRouter.get("/:assetId/audio/stream", streamAudioExtractionHandler);
+
+// Silence detection routes
+mediaRouter.post("/:assetId/silence/detect", detectSilenceHandler);
+mediaRouter.post("/:assetId/silence", detectSilenceHandler);
+mediaRouter.post("/:assetId/detect-silence", detectSilenceHandler);
+mediaRouter.get("/:assetId/silence", getSilenceDetectionHandler);
+mediaRouter.get("/:assetId/silence/status", getSilenceDetectionHandler);

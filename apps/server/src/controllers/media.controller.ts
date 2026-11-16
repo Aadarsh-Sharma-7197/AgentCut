@@ -14,6 +14,7 @@ import { inspectVideo } from "../utils/ffprobe.js";
 import * as projectService from "../services/project.service.js";
 import * as mediaService from "../services/media.service.js";
 import * as audioExtractionService from "../services/audio-extraction.service.js";
+import * as silenceDetectionService from "../services/silence-detection.service.js";
 import { resolveAssetAnalysisAudioPath } from "../config/storage.js";
 
 // Multer storage engine to save files directly into the project's media folder with a UUID
@@ -388,4 +389,98 @@ export async function streamAudioExtractionHandler(req: Request, res: Response):
   }
 }
 
+/**
+ * Handles requesting silence detection for a media asset using its extracted WAV artifact.
+ * Validates project ownership, asset ownership, extraction prerequisite, and parameters.
+ */
+export async function detectSilenceHandler(req: Request, res: Response): Promise<void> {
+  const { projectId, assetId } = req.params;
+
+  if (
+    typeof projectId !== "string" ||
+    !ObjectId.isValid(projectId) ||
+    typeof assetId !== "string" ||
+    !ObjectId.isValid(assetId)
+  ) {
+    res.status(400).json({ error: "Invalid project ID or asset ID format." });
+    return;
+  }
+
+  // Check project existence
+  const project = await projectService.getProjectById(projectId);
+  if (!project) {
+    res.status(404).json({ error: "Project not found." });
+    return;
+  }
+
+  // Check media asset existence and project ownership
+  const mediaAsset = await mediaService.getMediaAssetById(projectId, assetId);
+  if (!mediaAsset) {
+    res.status(404).json({ error: "Media asset not found in this project." });
+    return;
+  }
+
+  const { noiseThresholdDb, minDurationSeconds } = req.body || {};
+
+  try {
+    const artifact = await silenceDetectionService.detectSilence(projectId, assetId, {
+      noiseThresholdDb,
+      minDurationSeconds
+    });
+    res.status(200).json({ data: artifact });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Silence detection failed.";
+    if (
+      message.includes("extract audio before") ||
+      message.includes("must be a valid number") ||
+      message.includes("between")
+    ) {
+      res.status(400).json({ error: message });
+      return;
+    }
+    res.status(500).json({ error: message });
+  }
+}
+
+/**
+ * Retrieves silence detection metadata for a media asset.
+ */
+export async function getSilenceDetectionHandler(req: Request, res: Response): Promise<void> {
+  const { projectId, assetId } = req.params;
+
+  if (
+    typeof projectId !== "string" ||
+    !ObjectId.isValid(projectId) ||
+    typeof assetId !== "string" ||
+    !ObjectId.isValid(assetId)
+  ) {
+    res.status(400).json({ error: "Invalid project ID or asset ID format." });
+    return;
+  }
+
+  const project = await projectService.getProjectById(projectId);
+  if (!project) {
+    res.status(404).json({ error: "Project not found." });
+    return;
+  }
+
+  const mediaAsset = await mediaService.getMediaAssetById(projectId, assetId);
+  if (!mediaAsset) {
+    res.status(404).json({ error: "Media asset not found in this project." });
+    return;
+  }
+
+  try {
+    const artifact = await silenceDetectionService.getSilenceDetection(projectId, assetId);
+    if (!artifact) {
+      res.status(404).json({ error: "Silence detection has not been performed for this media asset." });
+      return;
+    }
+
+    res.status(200).json({ data: artifact });
+  } catch (err: unknown) {
+    console.error("[MediaController] getSilenceDetection error:", err);
+    res.status(500).json({ error: "Failed to retrieve silence detection metadata." });
+  }
+}
 

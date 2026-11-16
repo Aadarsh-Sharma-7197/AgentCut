@@ -22,6 +22,10 @@ import {
   initAudioExtractionIndexes,
   registerAudioExtractionShutdownHooks
 } from "./services/audio-extraction.service.js";
+import {
+  initSilenceDetectionIndexes,
+  registerSilenceDetectionShutdownHooks
+} from "./services/silence-detection.service.js";
 import { projectRouter } from "./routes/project.routes.js";
 
 const app = express();
@@ -69,8 +73,10 @@ export async function startServer() {
     await initTimelineIndexes();
     await initRenderJobIndexes();
     await initAudioExtractionIndexes();
+    await initSilenceDetectionIndexes();
     registerPipelineShutdownHooks();
     registerAudioExtractionShutdownHooks();
+    registerSilenceDetectionShutdownHooks();
     const server = app.listen(port, () => {
       console.log(`[Server] AgentCut API running on http://localhost:${port}`);
     });

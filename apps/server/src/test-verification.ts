@@ -36,6 +36,14 @@ import {
   cancelActiveExtraction,
   isExtractionActive
 } from "./services/audio-extraction.service.js";
+import {
+  detectSilence,
+  getSilenceDetection,
+  cancelActiveSilenceDetection,
+  isSilenceDetectionActive,
+  parseSilenceDetectOutput,
+  validateSilenceDetectionParameters
+} from "./services/silence-detection.service.js";
 import { ObjectId } from "mongodb";
 import type { Server } from "http";
 
@@ -1520,6 +1528,364 @@ async function runTests() {
       assert(!cancelActiveExtraction("nonexistent-asset"), "cancelActiveExtraction returns false for idle asset");
 
       // ----------------------------------------------------
+      // 38. Silence Detection (Step 5.2)
+      // ----------------------------------------------------
+      console.log("\n[Test 38] Silence Detection (Step 5.2)");
+      const silenceDetectionsCol = getDB().collection("silence_detections");
+
+      // 38.1 Validation of parameters
+      const defaultParams = validateSilenceDetectionParameters({});
+      assert(defaultParams.noiseThresholdDb === -35, "Default noise threshold is -35 dB");
+      assert(defaultParams.minDurationSeconds === 0.5, "Default minimum silence duration is 0.5s");
+
+      // Reject invalid parameters via API
+      const invalidThresholdRes = await fetch(
+        `${baseUrl}/api/projects/${projectId}/media/${assetWithAudioId}/silence/detect`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ noiseThresholdDb: 10 })
+        }
+      );
+      assert(invalidThresholdRes.status === 400, "Reject noiseThresholdDb > 0 dB with 400 Bad Request");
+
+      const invalidDurationRes = await fetch(
+        `${baseUrl}/api/projects/${projectId}/media/${assetWithAudioId}/silence/detect`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ minDurationSeconds: 0 })
+        }
+      );
+      assert(invalidDurationRes.status === 400, "Reject minDurationSeconds <= 0 with 400 Bad Request");
+
+      // 38.2 Reject detection when audio extraction is missing
+      const unextractedAssetId = new ObjectId().toHexString();
+      await mediaAssetsCol.insertOne({
+        _id: new ObjectId(unextractedAssetId),
+        projectId,
+        originalName: "unextracted.mp4",
+        storedFileName: "unextracted.mp4",
+        fileSize: 1000,
+        mimeType: "video/mp4",
+        duration: 2,
+        width: 320,
+        height: 240,
+        frameRate: "30",
+        videoCodec: "h264",
+        audioCodec: "aac",
+        format: "mp4",
+        createdAt: new Date()
+      });
+
+      const unextractedRes = await fetch(
+        `${baseUrl}/api/projects/${projectId}/media/${unextractedAssetId}/silence/detect`,
+        { method: "POST" }
+      );
+      assert(unextractedRes.status === 400, "Reject silence detection on unextracted asset with 400");
+      const unextractedJson = (await unextractedRes.json()) as any;
+      assert(
+        unextractedJson.error?.includes("extract audio before"),
+        "Error instructs client to extract audio first"
+      );
+
+      // 38.3 Synthetic silence interval testing using FFmpeg
+      async function setupSyntheticAssetWithAudio(
+        name: string,
+        ffmpegAudioFilterInputs: string[],
+        filterComplex: string
+      ): Promise<{ assetId: string; audioPath: string }> {
+        const id = new ObjectId().toHexString();
+        await mediaAssetsCol.insertOne({
+          _id: new ObjectId(id),
+          projectId,
+          originalName: `${name}.mp4`,
+          storedFileName: `${name}_video.mp4`,
+          fileSize: 10000,
+          mimeType: "video/mp4",
+          duration: 3,
+          width: 320,
+          height: 240,
+          frameRate: "30",
+          videoCodec: "h264",
+          audioCodec: "aac",
+          format: "mp4",
+          createdAt: new Date()
+        });
+
+        getAssetAnalysisDir(projectId, id);
+        const targetWav = resolveAssetAnalysisAudioPath(projectId, id);
+
+        const genArgs = [
+          "-y",
+          ...ffmpegAudioFilterInputs,
+          "-filter_complex", filterComplex,
+          "-map", "[outa]",
+          "-c:a", "pcm_s16le",
+          "-ar", "16000",
+          "-ac", "1",
+          "-f", "wav",
+          targetWav
+        ];
+        spawnSync(ffmpegPath, genArgs, { stdio: "ignore" });
+
+        const audioInfo = await inspectAudioFile(targetWav);
+
+        await audioExtractionsCol.insertOne({
+          _id: new ObjectId(),
+          projectId,
+          assetId: id,
+          status: "completed",
+          audioProperties: {
+            format: "wav",
+            codec: "pcm_s16le",
+            sampleRate: 16000,
+            channels: 1,
+            bitDepth: 16,
+            duration: audioInfo.duration
+          },
+          artifactSize: audioInfo.fileSize,
+          completedAt: new Date(),
+          createdAt: new Date(),
+          updatedAt: new Date()
+        });
+
+        return { assetId: id, audioPath: targetWav };
+      }
+
+      // Case A: Silence at the beginning (1s silence + 1s tone = 2s)
+      const silenceStartAsset = await setupSyntheticAssetWithAudio(
+        "silence_start",
+        [
+          "-f", "lavfi", "-i", "anullsrc=sample_rate=16000:duration=1:channel_layout=mono",
+          "-f", "lavfi", "-i", "sine=sample_rate=16000:frequency=1000:duration=1"
+        ],
+        "[0:a][1:a]concat=n=2:v=0:a=1[outa]"
+      );
+      const resStart = await fetch(
+        `${baseUrl}/api/projects/${projectId}/media/${silenceStartAsset.assetId}/silence/detect`,
+        { method: "POST" }
+      );
+      assert(resStart.status === 200, "POST silence/detect for silence at beginning returns 200");
+      const dataStart = ((await resStart.json()) as any).data;
+      assert(dataStart.intervals.length === 1, "Detected exactly 1 silence interval at beginning");
+      assert(dataStart.intervals[0].start === 0, "Silence start is at 0.0s");
+      assert(Math.abs(dataStart.intervals[0].end - 1.0) <= 0.1, "Silence end is ~1.0s");
+      assert(Math.abs(dataStart.intervals[0].duration - 1.0) <= 0.1, "Silence duration is ~1.0s");
+      assert(dataStart.totalSilenceDuration > 0.9, "Total silence duration matches interval");
+
+      // Case B: Silence in the middle (1s tone + 1s silence + 1s tone = 3s)
+      const silenceMidAsset = await setupSyntheticAssetWithAudio(
+        "silence_middle",
+        [
+          "-f", "lavfi", "-i", "sine=sample_rate=16000:frequency=1000:duration=1",
+          "-f", "lavfi", "-i", "anullsrc=sample_rate=16000:duration=1:channel_layout=mono",
+          "-f", "lavfi", "-i", "sine=sample_rate=16000:frequency=1000:duration=1"
+        ],
+        "[0:a][1:a][2:a]concat=n=3:v=0:a=1[outa]"
+      );
+      const resMid = await fetch(
+        `${baseUrl}/api/projects/${projectId}/media/${silenceMidAsset.assetId}/silence/detect`,
+        { method: "POST" }
+      );
+      assert(resMid.status === 200, "POST silence/detect for silence in middle returns 200");
+      const dataMid = ((await resMid.json()) as any).data;
+      assert(dataMid.intervals.length === 1, "Detected exactly 1 silence interval in middle");
+      assert(Math.abs(dataMid.intervals[0].start - 1.0) <= 0.1, "Silence start is ~1.0s");
+      assert(Math.abs(dataMid.intervals[0].end - 2.0) <= 0.1, "Silence end is ~2.0s");
+      assert(Math.abs(dataMid.intervals[0].duration - 1.0) <= 0.1, "Silence duration is ~1.0s");
+
+      // Case C: Silence at the end (1s tone + 1s silence = 2s)
+      const silenceEndAsset = await setupSyntheticAssetWithAudio(
+        "silence_end",
+        [
+          "-f", "lavfi", "-i", "sine=sample_rate=16000:frequency=1000:duration=1",
+          "-f", "lavfi", "-i", "anullsrc=sample_rate=16000:duration=1:channel_layout=mono"
+        ],
+        "[0:a][1:a]concat=n=2:v=0:a=1[outa]"
+      );
+      const resEnd = await fetch(
+        `${baseUrl}/api/projects/${projectId}/media/${silenceEndAsset.assetId}/silence/detect`,
+        { method: "POST" }
+      );
+      assert(resEnd.status === 200, "POST silence/detect for silence at end returns 200");
+      const dataEnd = ((await resEnd.json()) as any).data;
+      assert(dataEnd.intervals.length === 1, "Detected exactly 1 silence interval at end");
+      assert(Math.abs(dataEnd.intervals[0].start - 1.0) <= 0.1, "Silence start is ~1.0s");
+      assert(Math.abs(dataEnd.intervals[0].end - 2.0) <= 0.1, "Silence end is clamped to audio duration (~2.0s)");
+
+      // Case D: Multiple silence intervals (0.8s silence + 1s tone + 0.8s silence + 1s tone = 3.6s)
+      const silenceMultiAsset = await setupSyntheticAssetWithAudio(
+        "silence_multiple",
+        [
+          "-f", "lavfi", "-i", "anullsrc=sample_rate=16000:duration=0.8:channel_layout=mono",
+          "-f", "lavfi", "-i", "sine=sample_rate=16000:frequency=1000:duration=1",
+          "-f", "lavfi", "-i", "anullsrc=sample_rate=16000:duration=0.8:channel_layout=mono",
+          "-f", "lavfi", "-i", "sine=sample_rate=16000:frequency=1000:duration=1"
+        ],
+        "[0:a][1:a][2:a][3:a]concat=n=4:v=0:a=1[outa]"
+      );
+      const resMulti = await fetch(
+        `${baseUrl}/api/projects/${projectId}/media/${silenceMultiAsset.assetId}/silence/detect`,
+        { method: "POST" }
+      );
+      assert(resMulti.status === 200, "POST silence/detect for multiple silences returns 200");
+      const dataMulti = ((await resMulti.json()) as any).data;
+      assert(dataMulti.intervals.length === 2, "Detected exactly 2 silence intervals");
+      assert(dataMulti.intervals[0].start < dataMulti.intervals[1].start, "Intervals sorted chronologically");
+      assert(dataMulti.intervals[0].end <= dataMulti.intervals[1].start, "Intervals do not overlap");
+
+      // Case E: No silence detected (2s continuous tone)
+      const noSilenceAsset = await setupSyntheticAssetWithAudio(
+        "no_silence",
+        [
+          "-f", "lavfi", "-i", "sine=sample_rate=16000:frequency=1000:duration=2"
+        ],
+        "[0:a]anull[outa]"
+      );
+      const resNoSilence = await fetch(
+        `${baseUrl}/api/projects/${projectId}/media/${noSilenceAsset.assetId}/silence/detect`,
+        { method: "POST" }
+      );
+      assert(resNoSilence.status === 200, "POST silence/detect for tone returns 200");
+      const dataNoSilence = ((await resNoSilence.json()) as any).data;
+      assert(dataNoSilence.intervals.length === 0, "No silence detected in continuous tone");
+      assert(dataNoSilence.totalSilenceDuration === 0, "Total silence duration is 0");
+
+      // Case F: Silence shorter than configured minimum duration (0.25s silence when minDuration is 0.5s)
+      const shortSilenceAsset = await setupSyntheticAssetWithAudio(
+        "short_silence",
+        [
+          "-f", "lavfi", "-i", "sine=sample_rate=16000:frequency=1000:duration=1",
+          "-f", "lavfi", "-i", "anullsrc=sample_rate=16000:duration=0.25:channel_layout=mono",
+          "-f", "lavfi", "-i", "sine=sample_rate=16000:frequency=1000:duration=1"
+        ],
+        "[0:a][1:a][2:a]concat=n=3:v=0:a=1[outa]"
+      );
+      const resShort = await fetch(
+        `${baseUrl}/api/projects/${projectId}/media/${shortSilenceAsset.assetId}/silence/detect`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ minDurationSeconds: 0.5 })
+        }
+      );
+      assert(resShort.status === 200, "POST silence/detect for short silence returns 200");
+      const dataShort = ((await resShort.json()) as any).data;
+      assert(dataShort.intervals.length === 0, "Silence shorter than minDuration (0.25s < 0.5s) is filtered out");
+
+      // 38.4 Idempotency & Cache reuse with unchanged parameters
+      const resRepeat = await fetch(
+        `${baseUrl}/api/projects/${projectId}/media/${silenceMidAsset.assetId}/silence/detect`,
+        { method: "POST" }
+      );
+      assert(resRepeat.status === 200, "Repeated POST silence/detect returns 200 OK");
+      const dataRepeat = ((await resRepeat.json()) as any).data;
+      assert(dataRepeat.completedAt === dataMid.completedAt, "Cached result returned without re-running FFmpeg");
+
+      // 38.5 Reanalysis with changed parameters
+      const resReanalysis = await fetch(
+        `${baseUrl}/api/projects/${projectId}/media/${silenceMidAsset.assetId}/silence/detect`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ noiseThresholdDb: -50, minDurationSeconds: 0.8 })
+        }
+      );
+      assert(resReanalysis.status === 200, "Reanalysis with modified parameters returns 200 OK");
+      const dataReanalysis = ((await resReanalysis.json()) as any).data;
+      assert(dataReanalysis.parameters.noiseThresholdDb === -50, "Updated parameter noiseThresholdDb persisted");
+      assert(dataReanalysis.parameters.minDurationSeconds === 0.8, "Updated parameter minDurationSeconds persisted");
+
+      // 38.6 Concurrency deduplication
+      const [concA, concB] = await Promise.all([
+        detectSilence(projectId, silenceMidAsset.assetId, { noiseThresholdDb: -30 }),
+        detectSilence(projectId, silenceMidAsset.assetId, { noiseThresholdDb: -30 })
+      ]);
+      assert(concA.id === concB.id, "Concurrent detection calls return identical artifact");
+
+      // 38.7 GET silence detection endpoint
+      const resGetSilence = await fetch(
+        `${baseUrl}/api/projects/${projectId}/media/${silenceMidAsset.assetId}/silence`
+      );
+      assert(resGetSilence.status === 200, "GET silence status returns 200 OK");
+      const dataGetSilence = ((await resGetSilence.json()) as any).data;
+      assert(dataGetSilence.status === "completed", "GET returned status 'completed'");
+      const rawSilencePayload = JSON.stringify(dataGetSilence);
+      assert(!rawSilencePayload.includes("C:\\") && !rawSilencePayload.includes("/Users/"), "Client response never exposes server filesystem paths");
+
+      // 38.8 Missing WAV file on disk
+      const missingWavAsset = await setupSyntheticAssetWithAudio(
+        "missing_wav",
+        ["-f", "lavfi", "-i", "sine=sample_rate=16000:frequency=1000:duration=1"],
+        "[0:a]anull[outa]"
+      );
+      fs.unlinkSync(missingWavAsset.audioPath); // delete audio.wav
+      const resMissingWav = await fetch(
+        `${baseUrl}/api/projects/${projectId}/media/${missingWavAsset.assetId}/silence/detect`,
+        { method: "POST" }
+      );
+      assert(resMissingWav.status === 400, "Missing physical WAV returns 400 Bad Request");
+
+      // 38.9 Corrupt WAV file
+      const corruptWavAsset = await setupSyntheticAssetWithAudio(
+        "corrupt_wav",
+        ["-f", "lavfi", "-i", "sine=sample_rate=16000:frequency=1000:duration=1"],
+        "[0:a]anull[outa]"
+      );
+      fs.writeFileSync(corruptWavAsset.audioPath, Buffer.from("CORRUPT_NOT_A_VALID_WAV_HEADER_DATA"));
+      const resCorruptWav = await fetch(
+        `${baseUrl}/api/projects/${projectId}/media/${corruptWavAsset.assetId}/silence/detect`,
+        { method: "POST" }
+      );
+      assert(resCorruptWav.status === 500, "Corrupt WAV execution returns 500");
+
+      // 38.10 Cross-project access rejection
+      const resCrossSilence = await fetch(
+        `${baseUrl}/api/projects/${project2Id}/media/${silenceMidAsset.assetId}/silence/detect`,
+        { method: "POST" }
+      );
+      assert(resCrossSilence.status === 404, "Cross-project silence detection returns 404 Not Found");
+
+      const resCrossGetSilence = await fetch(
+        `${baseUrl}/api/projects/${project2Id}/media/${silenceMidAsset.assetId}/silence`
+      );
+      assert(resCrossGetSilence.status === 404, "Cross-project GET silence returns 404 Not Found");
+
+      // 38.11 Active detection status & cancellation
+      assert(!isSilenceDetectionActive("nonexistent-asset"), "isSilenceDetectionActive returns false for idle asset");
+      assert(!cancelActiveSilenceDetection("nonexistent-asset"), "cancelActiveSilenceDetection returns false for idle asset");
+
+      // Test live cancellation on a running FFmpeg process
+      const longCancelAsset = await setupSyntheticAssetWithAudio(
+        "long_cancel",
+        ["-f", "lavfi", "-i", "anullsrc=sample_rate=16000:duration=30:channel_layout=mono"],
+        "[0:a]anull[outa]"
+      );
+      const cancelDetectPromise = detectSilence(projectId, longCancelAsset.assetId, { noiseThresholdDb: -45 });
+
+      // Wait for the async preparation to complete and FFmpeg process to become active
+      let isActive = false;
+      for (let i = 0; i < 100; i++) {
+        if (isSilenceDetectionActive(longCancelAsset.assetId)) {
+          isActive = true;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      assert(isActive, "isSilenceDetectionActive returns true while process is running");
+      const wasCanceled = cancelActiveSilenceDetection(longCancelAsset.assetId);
+      assert(wasCanceled, "cancelActiveSilenceDetection returns true when terminating active process");
+      assert(!isSilenceDetectionActive(longCancelAsset.assetId), "isSilenceDetectionActive returns false immediately after cancellation");
+      let cancelRejected = false;
+      try {
+        await cancelDetectPromise;
+      } catch {
+        cancelRejected = true;
+      }
+      assert(cancelRejected, "Active detection promise rejects when process is cancelled");
+
+      // ----------------------------------------------------
       // 24. Project Deletion: Removes Timeline Metadata & Preserves Files
       // ----------------------------------------------------
       console.log("\n[Test 24] Project Deletion: Removes Timeline Metadata & Preserves Local Files");
@@ -1540,6 +1906,10 @@ async function runTests() {
       // Confirm audio extraction metadata exists in DB before project deletion
       const extractionsBefore = await audioExtractionsCol.find({ projectId }).toArray();
       assert(extractionsBefore.length > 0, "Audio extraction metadata exists in MongoDB before project deletion");
+
+      // Confirm silence detection metadata exists in DB before project deletion
+      const silenceBefore = await silenceDetectionsCol.find({ projectId }).toArray();
+      assert(silenceBefore.length > 0, "Silence detection metadata exists in MongoDB before project deletion");
 
       // Create a render job for project 2 to verify cross-project isolation during deletion
       const otherProjectJobId = new ObjectId().toHexString();
@@ -1590,6 +1960,10 @@ async function runTests() {
       // Check audio extraction metadata deleted for deleted project
       const remainingExtractionDocs = await audioExtractionsCol.find({ projectId }).toArray();
       assert(remainingExtractionDocs.length === 0, "Associated audio extraction metadata records removed from MongoDB upon project deletion");
+
+      // Check silence detection metadata deleted for deleted project
+      const remainingSilenceDocs = await silenceDetectionsCol.find({ projectId }).toArray();
+      assert(remainingSilenceDocs.length === 0, "Associated silence detection metadata records removed from MongoDB upon project deletion");
 
       // Check render job metadata belonging to project 2 remains intact
       const otherJobStillExists = await renderJobsCol.findOne({ jobId: otherProjectJobId });

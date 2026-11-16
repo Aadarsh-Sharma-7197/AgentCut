@@ -21,4 +21,31 @@ export interface AudioExtractionArtifact {
   createdAt: string;
   updatedAt: string;
 }
+export type SilenceDetectionStatus = "detecting" | "completed" | "failed";
+
+export interface SilenceInterval {
+  start: number;
+  end: number;
+  duration: number;
+}
+
+export interface SilenceDetectionParameters {
+  noiseThresholdDb: number;
+  minDurationSeconds: number;
+}
+
+export interface SilenceDetectionArtifact {
+  id: string;
+  projectId: string;
+  assetId: string;
+  status: SilenceDetectionStatus;
+  parameters: SilenceDetectionParameters;
+  intervals: SilenceInterval[];
+  totalSilenceDuration: number;
+  audioDuration: number;
+  completedAt?: string;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+}
 
