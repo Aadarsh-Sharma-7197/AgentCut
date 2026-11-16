@@ -13,6 +13,8 @@ import {
 import { inspectVideo } from "../utils/ffprobe.js";
 import * as projectService from "../services/project.service.js";
 import * as mediaService from "../services/media.service.js";
+import * as audioExtractionService from "../services/audio-extraction.service.js";
+import { resolveAssetAnalysisAudioPath } from "../config/storage.js";
 
 // Multer storage engine to save files directly into the project's media folder with a UUID
 const storage = multer.diskStorage({
@@ -237,4 +239,153 @@ export async function streamMediaHandler(req: Request, res: Response): Promise<v
     }
   }
 }
+
+/**
+ * Handles requesting an audio extraction for an imported media asset.
+ * Validates project ownership, enforces concurrency deduplication, and runs extraction safely.
+ * Never exposes server filesystem paths.
+ */
+export async function requestAudioExtractionHandler(req: Request, res: Response): Promise<void> {
+  const { projectId, assetId } = req.params;
+
+  if (
+    typeof projectId !== "string" ||
+    !ObjectId.isValid(projectId) ||
+    typeof assetId !== "string" ||
+    !ObjectId.isValid(assetId)
+  ) {
+    res.status(400).json({ error: "Invalid project ID or asset ID format." });
+    return;
+  }
+
+  // Check project existence
+  const project = await projectService.getProjectById(projectId);
+  if (!project) {
+    res.status(404).json({ error: "Project not found." });
+    return;
+  }
+
+  // Check media asset existence and project ownership
+  const mediaAsset = await mediaService.getMediaAssetById(projectId, assetId);
+  if (!mediaAsset) {
+    res.status(404).json({ error: "Media asset not found in this project." });
+    return;
+  }
+
+  try {
+    const artifact = await audioExtractionService.requestAudioExtraction(projectId, assetId);
+    res.status(200).json({ data: artifact });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Audio extraction failed.";
+    if (message.includes("not found on disk")) {
+      res.status(404).json({ error: message });
+      return;
+    }
+    res.status(500).json({ error: message });
+  }
+}
+
+/**
+ * Retrieves the current audio extraction metadata and status for a media asset.
+ * Never exposes server filesystem paths.
+ */
+export async function getAudioExtractionHandler(req: Request, res: Response): Promise<void> {
+  const { projectId, assetId } = req.params;
+
+  if (
+    typeof projectId !== "string" ||
+    !ObjectId.isValid(projectId) ||
+    typeof assetId !== "string" ||
+    !ObjectId.isValid(assetId)
+  ) {
+    res.status(400).json({ error: "Invalid project ID or asset ID format." });
+    return;
+  }
+
+  // Check project existence
+  const project = await projectService.getProjectById(projectId);
+  if (!project) {
+    res.status(404).json({ error: "Project not found." });
+    return;
+  }
+
+  // Check media asset existence and project ownership
+  const mediaAsset = await mediaService.getMediaAssetById(projectId, assetId);
+  if (!mediaAsset) {
+    res.status(404).json({ error: "Media asset not found in this project." });
+    return;
+  }
+
+  try {
+    const artifact = await audioExtractionService.getAudioExtraction(projectId, assetId);
+    if (!artifact) {
+      res.status(404).json({ error: "Audio extraction has not been performed for this media asset." });
+      return;
+    }
+
+    res.status(200).json({ data: artifact });
+  } catch (err: unknown) {
+    console.error("[MediaController] getAudioExtraction error:", err);
+    res.status(500).json({ error: "Failed to retrieve audio extraction metadata." });
+  }
+}
+
+/**
+ * Streams the extracted audio WAV file for preview/inspection.
+ * Validates project ownership and checks that the extraction is completed.
+ */
+export async function streamAudioExtractionHandler(req: Request, res: Response): Promise<void> {
+  const { projectId, assetId } = req.params;
+
+  if (
+    typeof projectId !== "string" ||
+    !ObjectId.isValid(projectId) ||
+    typeof assetId !== "string" ||
+    !ObjectId.isValid(assetId)
+  ) {
+    res.status(400).json({ error: "Invalid project ID or asset ID format." });
+    return;
+  }
+
+  const project = await projectService.getProjectById(projectId);
+  if (!project) {
+    res.status(404).json({ error: "Project not found." });
+    return;
+  }
+
+  const mediaAsset = await mediaService.getMediaAssetById(projectId, assetId);
+  if (!mediaAsset) {
+    res.status(404).json({ error: "Media asset not found in this project." });
+    return;
+  }
+
+  const artifact = await audioExtractionService.getAudioExtraction(projectId, assetId);
+  if (!artifact || artifact.status !== "completed") {
+    res.status(404).json({ error: "Extracted audio not found or extraction is not completed." });
+    return;
+  }
+
+  try {
+    const audioPath = resolveAssetAnalysisAudioPath(projectId, assetId);
+    if (!fs.existsSync(audioPath)) {
+      res.status(404).json({ error: "Extracted audio file not found on disk." });
+      return;
+    }
+
+    const stat = fs.statSync(audioPath);
+    res.writeHead(200, {
+      "Content-Length": stat.size,
+      "Content-Type": "audio/wav",
+      "Accept-Ranges": "bytes"
+    });
+
+    fs.createReadStream(audioPath).pipe(res);
+  } catch (err: unknown) {
+    console.error("[MediaController] streamAudioExtraction error:", err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Failed to stream audio file." });
+    }
+  }
+}
+
 

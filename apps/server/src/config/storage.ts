@@ -88,3 +88,61 @@ export function resolveExportFilePath(projectId: string, fileName: string): stri
   return resolved;
 }
 
+export function getProjectAnalysisDir(projectId: string): string {
+  const root = getDataDir();
+  const projectAnalysisDir = path.join(root, "projects", projectId, "analysis");
+
+  // Prevent path traversal on projectId
+  const resolved = path.resolve(projectAnalysisDir);
+  const expectedPrefix = path.resolve(root, "projects");
+  if (!resolved.startsWith(expectedPrefix)) {
+    throw new Error("Invalid project ID path.");
+  }
+
+  if (!fs.existsSync(resolved)) {
+    fs.mkdirSync(resolved, { recursive: true });
+  }
+
+  return resolved;
+}
+
+export function getAssetAnalysisDir(projectId: string, assetId: string): string {
+  const analysisDir = getProjectAnalysisDir(projectId);
+  const assetDir = path.join(analysisDir, assetId);
+
+  // Prevent path traversal on assetId
+  const resolved = path.resolve(assetDir);
+  if (!resolved.startsWith(analysisDir + path.sep) && resolved !== analysisDir) {
+    throw new Error("Invalid asset ID path: path traversal detected.");
+  }
+
+  if (!fs.existsSync(resolved)) {
+    fs.mkdirSync(resolved, { recursive: true });
+  }
+
+  return resolved;
+}
+
+export function resolveAssetAnalysisAudioPath(projectId: string, assetId: string): string {
+  const assetDir = getAssetAnalysisDir(projectId, assetId);
+  const resolved = path.resolve(assetDir, "audio.wav");
+
+  if (!resolved.startsWith(assetDir + path.sep)) {
+    throw new Error("Invalid audio path: path traversal detected.");
+  }
+
+  return resolved;
+}
+
+export function resolveAssetAnalysisTempAudioPath(projectId: string, assetId: string): string {
+  const assetDir = getAssetAnalysisDir(projectId, assetId);
+  const resolved = path.resolve(assetDir, "audio.tmp.wav");
+
+  if (!resolved.startsWith(assetDir + path.sep)) {
+    throw new Error("Invalid temp audio path: path traversal detected.");
+  }
+
+  return resolved;
+}
+
+

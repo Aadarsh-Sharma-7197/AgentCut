@@ -5,7 +5,10 @@ import {
   uploadMediaHandler,
   getMediaListHandler,
   getMediaAssetHandler,
-  streamMediaHandler
+  streamMediaHandler,
+  requestAudioExtractionHandler,
+  getAudioExtractionHandler,
+  streamAudioExtractionHandler
 } from "../controllers/media.controller.js";
 
 export const mediaRouter = Router({ mergeParams: true });
@@ -29,3 +32,10 @@ mediaRouter.post("/", handleUpload, uploadMediaHandler);
 mediaRouter.get("/", getMediaListHandler);
 mediaRouter.get("/:assetId", getMediaAssetHandler);
 mediaRouter.get("/:assetId/stream", streamMediaHandler);
+
+// Audio extraction routes
+mediaRouter.post("/:assetId/extract-audio", requestAudioExtractionHandler);
+mediaRouter.post("/:assetId/audio/extract", requestAudioExtractionHandler);
+mediaRouter.post("/:assetId/audio", requestAudioExtractionHandler);
+mediaRouter.get("/:assetId/audio", getAudioExtractionHandler);
+mediaRouter.get("/:assetId/audio/stream", streamAudioExtractionHandler);

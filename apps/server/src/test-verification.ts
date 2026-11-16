@@ -10,9 +10,18 @@ dotenv.config({ path: "./apps/server/.env" });
 dotenv.config({ path: path.resolve(process.cwd(), "apps/server/.env") });
 
 const { default: app } = await import("./index.js");
+import crypto from "crypto";
 import { connectDB, closeDB, getDB } from "./config/db.js";
-import { getProjectMediaDir, resolveStoredFilePath, getProjectExportDir, resolveExportFilePath } from "./config/storage.js";
-import { getFFprobePath, inspectVideo } from "./utils/ffprobe.js";
+import {
+  getProjectMediaDir,
+  resolveStoredFilePath,
+  getProjectExportDir,
+  resolveExportFilePath,
+  getAssetAnalysisDir,
+  resolveAssetAnalysisAudioPath,
+  resolveAssetAnalysisTempAudioPath
+} from "./config/storage.js";
+import { getFFprobePath, inspectVideo, inspectAudioFile } from "./utils/ffprobe.js";
 import { getFFmpegPath, checkFFmpegAvailable, validateFFmpegSafety } from "./utils/ffmpeg.js";
 import {
   buildFFmpegRenderArgs,
@@ -21,6 +30,12 @@ import {
   isJobActive,
   cancelActiveRender
 } from "./services/render-pipeline.service.js";
+import {
+  requestAudioExtraction,
+  getAudioExtraction,
+  cancelActiveExtraction,
+  isExtractionActive
+} from "./services/audio-extraction.service.js";
 import { ObjectId } from "mongodb";
 import type { Server } from "http";
 
@@ -56,6 +71,8 @@ async function runTests() {
   const tempDir = os.tmpdir();
   const validMp4Path = path.join(tempDir, "agentcut_valid_test.mp4");
   const audioOnlyMp4Path = path.join(tempDir, "agentcut_audio_test.mp4");
+  const videoWithAudioPath = path.join(tempDir, "agentcut_video_with_audio_test.mp4");
+  const videoWithoutAudioPath = path.join(tempDir, "agentcut_video_no_audio_test.mp4");
 
   const ffprobePath = getFFprobePath();
   const ffmpegPath = ffprobePath.replace(/ffprobe(\.exe)?$/i, "ffmpeg$1");
@@ -73,6 +90,29 @@ async function runTests() {
     spawnSync(
       ffmpegPath,
       ["-f", "lavfi", "-i", "sine=frequency=1000:duration=1", "-c:a", "aac", "-vn", "-y", audioOnlyMp4Path],
+      { stdio: "ignore" }
+    );
+    // Generate 2-sec video with AAC audio
+    spawnSync(
+      ffmpegPath,
+      [
+        "-f", "lavfi", "-i", "testsrc=duration=2:size=320x240:rate=30",
+        "-f", "lavfi", "-i", "sine=frequency=1000:duration=2",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        "-y", videoWithAudioPath
+      ],
+      { stdio: "ignore" }
+    );
+    // Generate 1-sec video without audio stream
+    spawnSync(
+      ffmpegPath,
+      [
+        "-f", "lavfi", "-i", "testsrc=duration=1:size=320x240:rate=30",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-an",
+        "-y", videoWithoutAudioPath
+      ],
       { stdio: "ignore" }
     );
   }
@@ -1280,10 +1320,209 @@ async function runTests() {
       }
 
       // ----------------------------------------------------
+      // 37. Audio Extraction Foundation (Step 5.1)
+      // ----------------------------------------------------
+      console.log("\n[Test 37] Audio Extraction Foundation (Step 5.1)");
+      const audioExtractionsCol = getDB().collection("audio_extractions");
+      const mediaAssetsCol = getDB().collection("media_assets");
+
+      function getFileSha256(filePath: string): string {
+        const data = fs.readFileSync(filePath);
+        return crypto.createHash("sha256").update(data).digest("hex");
+      }
+
+      // 37.1 Upload synthetic video with audio
+      const formDataWithAudio = new FormData();
+      formDataWithAudio.append("file", new Blob([fs.readFileSync(videoWithAudioPath)]), "video_with_audio.mp4");
+      const uploadWithAudioRes = await fetch(`${baseUrl}/api/projects/${projectId}/media`, {
+        method: "POST",
+        body: formDataWithAudio
+      });
+      assert(uploadWithAudioRes.status === 201, "Uploaded video with audio successfully");
+      const assetWithAudio = ((await uploadWithAudioRes.json()) as any).data;
+      const assetWithAudioId = assetWithAudio.id;
+
+      // Also get physical path on disk for source immutability check
+      const assetWithAudioDoc = await mediaAssetsCol.findOne({ _id: new ObjectId(assetWithAudioId) });
+      const assetWithAudioPath = resolveStoredFilePath(projectId, assetWithAudioDoc!.storedFileName);
+      const sourceSizeBefore = fs.statSync(assetWithAudioPath).size;
+      const sourceShaBefore = getFileSha256(assetWithAudioPath);
+
+      // 37.2 Request audio extraction
+      const extractRes = await fetch(
+        `${baseUrl}/api/projects/${projectId}/media/${assetWithAudioId}/audio/extract`,
+        { method: "POST" }
+      );
+      assert(extractRes.status === 200, "POST audio/extract returns 200 OK");
+      const extractData = ((await extractRes.json()) as any).data;
+
+      assert(extractData.status === "completed", "Audio extraction status is 'completed'");
+      assert(extractData.projectId === projectId, "Extraction artifact matches projectId");
+      assert(extractData.assetId === assetWithAudioId, "Extraction artifact matches assetId");
+      assert(extractData.audioProperties?.format === "wav", "Audio format is 'wav'");
+      assert(extractData.audioProperties?.codec === "pcm_s16le", "Audio codec is 'pcm_s16le'");
+      assert(extractData.audioProperties?.sampleRate === 16000, "Audio sample rate is 16000 Hz");
+      assert(extractData.audioProperties?.channels === 1, "Audio is mono (1 channel)");
+      assert(extractData.audioProperties?.bitDepth === 16, "Audio bit depth is 16-bit");
+      assert(extractData.audioProperties?.duration >= 1.8, "Audio duration is valid (~2s)");
+      assert(extractData.artifactSize > 0, "Artifact size is > 0 bytes");
+      assert(Boolean(extractData.completedAt), "completedAt timestamp is recorded");
+
+      // Verify no server paths are exposed to client
+      const rawPayload = JSON.stringify(extractData);
+      assert(!rawPayload.includes("C:\\") && !rawPayload.includes("/Users/") && !extractData.resolvedPath, "Client response never exposes server filesystem paths");
+
+      // 37.3 Verify physical audio.wav on disk
+      const expectedWavPath = resolveAssetAnalysisAudioPath(projectId, assetWithAudioId);
+      assert(fs.existsSync(expectedWavPath), "Extracted audio.wav exists on disk at expected analysis path");
+      const tempWavPath = resolveAssetAnalysisTempAudioPath(projectId, assetWithAudioId);
+      assert(!fs.existsSync(tempWavPath), "Temporary audio.tmp.wav was cleaned up upon completion");
+
+      // Verify audio properties directly with FFprobe
+      const inspectedWav = await inspectAudioFile(expectedWavPath);
+      assert(inspectedWav.codec === "pcm_s16le", "FFprobe verifies output codec is pcm_s16le");
+      assert(inspectedWav.sampleRate === 16000, "FFprobe verifies output sample rate is 16000 Hz");
+      assert(inspectedWav.channels === 1, "FFprobe verifies output is mono (1 channel)");
+      assert(inspectedWav.format === "wav", "FFprobe verifies output format is wav");
+
+      // 37.4 Source media preservation
+      const sourceSizeAfter = fs.statSync(assetWithAudioPath).size;
+      const sourceShaAfter = getFileSha256(assetWithAudioPath);
+      assert(sourceSizeBefore === sourceSizeAfter, "CRITICAL: Source video file size is 100% unchanged after extraction");
+      assert(sourceShaBefore === sourceShaAfter, "CRITICAL: Source video SHA-256 checksum is 100% unchanged after extraction");
+
+      // 37.5 Retrieve extraction status via GET
+      const getStatusRes = await fetch(`${baseUrl}/api/projects/${projectId}/media/${assetWithAudioId}/audio`);
+      assert(getStatusRes.status === 200, "GET /api/projects/:id/media/:assetId/audio returns 200 OK");
+      const getStatusData = ((await getStatusRes.json()) as any).data;
+      assert(getStatusData.status === "completed", "GET returns status 'completed'");
+      assert(getStatusData.artifactSize === extractData.artifactSize, "GET artifact size matches");
+
+      // 37.6 Stream extracted WAV via GET
+      const streamWavRes = await fetch(`${baseUrl}/api/projects/${projectId}/media/${assetWithAudioId}/audio/stream`);
+      assert(streamWavRes.status === 200, "GET /api/projects/:id/media/:assetId/audio/stream returns 200 OK");
+      assert(streamWavRes.headers.get("content-type") === "audio/wav", "Stream Content-Type is audio/wav");
+      const streamedBuf = await streamWavRes.arrayBuffer();
+      assert(streamedBuf.byteLength === extractData.artifactSize, "Streamed audio length matches artifact size");
+
+      // 37.7 Idempotency & Caching: Repeated request avoids re-running FFmpeg
+      const repeatExtractRes = await fetch(
+        `${baseUrl}/api/projects/${projectId}/media/${assetWithAudioId}/audio/extract`,
+        { method: "POST" }
+      );
+      assert(repeatExtractRes.status === 200, "Repeated POST audio/extract returns 200 OK");
+      const repeatData = ((await repeatExtractRes.json()) as any).data;
+      assert(repeatData.completedAt === extractData.completedAt, "Repeated request returns cached extraction without re-running");
+
+      // 37.8 Concurrency deduplication
+      const [conc1, conc2] = await Promise.all([
+        requestAudioExtraction(projectId, assetWithAudioId),
+        requestAudioExtraction(projectId, assetWithAudioId)
+      ]);
+      assert(conc1.id === conc2.id, "Concurrent extraction calls return identical artifact");
+
+      // 37.9 Video with no audio stream
+      const formDataNoAudio = new FormData();
+      formDataNoAudio.append("file", new Blob([fs.readFileSync(videoWithoutAudioPath)]), "video_no_audio.mp4");
+      const uploadNoAudioRes = await fetch(`${baseUrl}/api/projects/${projectId}/media`, {
+        method: "POST",
+        body: formDataNoAudio
+      });
+      assert(uploadNoAudioRes.status === 201, "Uploaded video without audio successfully");
+      const assetNoAudio = ((await uploadNoAudioRes.json()) as any).data;
+      const assetNoAudioId = assetNoAudio.id;
+
+      const noAudioExtractRes = await fetch(
+        `${baseUrl}/api/projects/${projectId}/media/${assetNoAudioId}/audio/extract`,
+        { method: "POST" }
+      );
+      assert(noAudioExtractRes.status === 200, "Audio extraction on video without audio returns 200");
+      const noAudioData = ((await noAudioExtractRes.json()) as any).data;
+      assert(noAudioData.status === "no_audio", "Status is explicitly 'no_audio'");
+      assert(noAudioData.error?.includes("does not contain an audio stream"), "Error explains media asset has no audio stream");
+      const noAudioWavPath = resolveAssetAnalysisAudioPath(projectId, assetNoAudioId);
+      assert(!fs.existsSync(noAudioWavPath), "No audio.wav was generated for video without audio");
+
+      // 37.10 Missing source file handling
+      const missingAssetId = new ObjectId().toHexString();
+      await mediaAssetsCol.insertOne({
+        _id: new ObjectId(missingAssetId),
+        projectId,
+        originalName: "ghost.mp4",
+        storedFileName: "nonexistent-ghost-uuid.mp4",
+        fileSize: 1000,
+        mimeType: "video/mp4",
+        duration: 1,
+        width: 320,
+        height: 240,
+        frameRate: "30",
+        videoCodec: "h264",
+        audioCodec: "aac",
+        format: "mp4",
+        createdAt: new Date()
+      });
+      const missingExtractRes = await fetch(
+        `${baseUrl}/api/projects/${projectId}/media/${missingAssetId}/audio/extract`,
+        { method: "POST" }
+      );
+      assert(missingExtractRes.status === 404, "Extraction on missing source file returns 404");
+      const missingDoc = await audioExtractionsCol.findOne({ projectId, assetId: missingAssetId });
+      assert(missingDoc?.status === "failed", "MongoDB record reflects 'failed' status for missing file");
+      assert(missingDoc?.error?.includes("not found on disk"), "MongoDB record error notes file not on disk");
+
+      // 37.11 Corrupt source file handling & temp file cleanup
+      const corruptFileName = `${new ObjectId().toHexString()}_corrupt.mp4`;
+      const corruptFilePath = resolveStoredFilePath(projectId, corruptFileName);
+      fs.writeFileSync(corruptFilePath, Buffer.from("NOT_A_VALID_VIDEO_FILE_AT_ALL_CORRUPT_DATA"));
+      const corruptAssetId = new ObjectId().toHexString();
+      await mediaAssetsCol.insertOne({
+        _id: new ObjectId(corruptAssetId),
+        projectId,
+        originalName: "corrupt.mp4",
+        storedFileName: corruptFileName,
+        fileSize: 40,
+        mimeType: "video/mp4",
+        duration: 1,
+        width: 320,
+        height: 240,
+        frameRate: "30",
+        videoCodec: "h264",
+        audioCodec: "aac",
+        format: "mp4",
+        createdAt: new Date()
+      });
+
+      const corruptExtractRes = await fetch(
+        `${baseUrl}/api/projects/${projectId}/media/${corruptAssetId}/audio/extract`,
+        { method: "POST" }
+      );
+      assert(corruptExtractRes.status === 500, "Extraction on corrupt file returns 500");
+      const corruptDoc = await audioExtractionsCol.findOne({ projectId, assetId: corruptAssetId });
+      assert(corruptDoc?.status === "failed", "MongoDB record reflects 'failed' status for corrupt media");
+      const corruptTempPath = resolveAssetAnalysisTempAudioPath(projectId, corruptAssetId);
+      assert(!fs.existsSync(corruptTempPath), "Temporary .tmp.wav cleaned up on corrupt extraction failure");
+      try { if (fs.existsSync(corruptFilePath)) fs.unlinkSync(corruptFilePath); } catch {}
+
+      // 37.12 Cross-project access rejection
+      const crossExtractRes = await fetch(
+        `${baseUrl}/api/projects/${project2Id}/media/${assetWithAudioId}/audio/extract`,
+        { method: "POST" }
+      );
+      assert(crossExtractRes.status === 404, "Cross-project extraction returns 404 Not Found");
+
+      const crossGetRes = await fetch(
+        `${baseUrl}/api/projects/${project2Id}/media/${assetWithAudioId}/audio`
+      );
+      assert(crossGetRes.status === 404, "Cross-project GET status returns 404 Not Found");
+
+      // 37.13 Cancellation & Active Process Cleanup
+      assert(!isExtractionActive("nonexistent-asset"), "isExtractionActive returns false for idle asset");
+      assert(!cancelActiveExtraction("nonexistent-asset"), "cancelActiveExtraction returns false for idle asset");
+
+      // ----------------------------------------------------
       // 24. Project Deletion: Removes Timeline Metadata & Preserves Files
       // ----------------------------------------------------
       console.log("\n[Test 24] Project Deletion: Removes Timeline Metadata & Preserves Local Files");
-      const mediaAssetsCol = getDB().collection("media_assets");
       const assetDoc = await mediaAssetsCol.findOne({ projectId });
       assert(Boolean(assetDoc), "Asset document exists in MongoDB before deletion");
       const storedFileName = assetDoc?.storedFileName;
@@ -1297,6 +1536,10 @@ async function runTests() {
       // Confirm render job metadata exists in DB before project deletion
       const renderJobsBefore = await renderJobsCol.find({ projectId }).toArray();
       assert(renderJobsBefore.length > 0, "Render job metadata exists in MongoDB before project deletion");
+
+      // Confirm audio extraction metadata exists in DB before project deletion
+      const extractionsBefore = await audioExtractionsCol.find({ projectId }).toArray();
+      assert(extractionsBefore.length > 0, "Audio extraction metadata exists in MongoDB before project deletion");
 
       // Create a render job for project 2 to verify cross-project isolation during deletion
       const otherProjectJobId = new ObjectId().toHexString();
@@ -1344,6 +1587,10 @@ async function runTests() {
       const remainingRenderJobDocs = await renderJobsCol.find({ projectId }).toArray();
       assert(remainingRenderJobDocs.length === 0, "Associated render job metadata records removed from MongoDB upon project deletion");
 
+      // Check audio extraction metadata deleted for deleted project
+      const remainingExtractionDocs = await audioExtractionsCol.find({ projectId }).toArray();
+      assert(remainingExtractionDocs.length === 0, "Associated audio extraction metadata records removed from MongoDB upon project deletion");
+
       // Check render job metadata belonging to project 2 remains intact
       const otherJobStillExists = await renderJobsCol.findOne({ jobId: otherProjectJobId });
       assert(Boolean(otherJobStillExists), "Render jobs belonging to another project remain completely intact in MongoDB");
@@ -1365,12 +1612,17 @@ async function runTests() {
         if (fs.existsSync(filePathOnDisk)) fs.unlinkSync(filePathOnDisk);
         if (fs.existsSync(validMp4Path)) fs.unlinkSync(validMp4Path);
         if (fs.existsSync(audioOnlyMp4Path)) fs.unlinkSync(audioOnlyMp4Path);
+        if (fs.existsSync(videoWithAudioPath)) fs.unlinkSync(videoWithAudioPath);
+        if (fs.existsSync(videoWithoutAudioPath)) fs.unlinkSync(videoWithoutAudioPath);
       } catch {}
     } else {
       console.log("  - Skipped: validMp4 test file not generated");
     }
 
     console.log(`\n=== Verification Results: ${passed} passed, ${failed} failed ===`);
+  } catch (err) {
+    console.error("Test caught fatal error:", err);
+    failed++;
   } finally {
     server!.close();
     await closeDB();

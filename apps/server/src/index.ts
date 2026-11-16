@@ -18,6 +18,10 @@ import { initMediaIndexes } from "./services/media.service.js";
 import { initTimelineIndexes } from "./services/timeline.service.js";
 import { initRenderJobIndexes } from "./services/render-job.service.js";
 import { registerPipelineShutdownHooks } from "./services/render-pipeline.service.js";
+import {
+  initAudioExtractionIndexes,
+  registerAudioExtractionShutdownHooks
+} from "./services/audio-extraction.service.js";
 import { projectRouter } from "./routes/project.routes.js";
 
 const app = express();
@@ -64,7 +68,9 @@ export async function startServer() {
     await initMediaIndexes();
     await initTimelineIndexes();
     await initRenderJobIndexes();
+    await initAudioExtractionIndexes();
     registerPipelineShutdownHooks();
+    registerAudioExtractionShutdownHooks();
     const server = app.listen(port, () => {
       console.log(`[Server] AgentCut API running on http://localhost:${port}`);
     });
