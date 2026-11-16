@@ -44,6 +44,29 @@ import {
   parseSilenceDetectOutput,
   validateSilenceDetectionParameters
 } from "./services/silence-detection.service.js";
+import {
+  requestTranscription,
+  getTranscription,
+  getTranscriptionWithTranscript,
+  cancelTranscription,
+  isTranscriptionActive,
+  validateTranscriptionParameters,
+  validateTranscriptData,
+  ALLOWED_MODELS
+} from "./services/transcription.service.js";
+import {
+  probeWorkerHardware,
+  sendRequestToWorker,
+  setMockWorkerHandler,
+  ensureWorkerRunning,
+  stopWorker,
+  isWorkerAlive
+} from "./services/transcription-worker.service.js";
+import {
+  getAssetTranscriptionDir,
+  resolveAssetTranscriptPath,
+  resolveAssetTranscriptTempPath
+} from "./config/storage.js";
 import { ObjectId } from "mongodb";
 import type { Server } from "http";
 
@@ -1886,6 +1909,411 @@ async function runTests() {
       assert(cancelRejected, "Active detection promise rejects when process is cancelled");
 
       // ----------------------------------------------------
+      // 39. Multilingual Audio Transcription Foundation (Step 5.3)
+      // ----------------------------------------------------
+      console.log("\n[Test 39] Multilingual Audio Transcription Foundation (Step 5.3)");
+      const transcriptionsCol = getDB().collection("transcriptions");
+
+      // 39.1 Real Hardware & Library Capabilities Probing
+      const probeRes = await probeWorkerHardware();
+      assert(probeRes.success, "Real worker probeHardware returns success");
+      assert(probeRes.cuda_available === true, "Probe detects NVIDIA CUDA is available on GTX 1650");
+      assert(probeRes.cuda_device_count >= 1, "Probe reports at least 1 CUDA device");
+      assert(probeRes.supported_compute_types_cuda.includes("int8_float16"), "CUDA supports memory-conscious 'int8_float16'");
+      assert(probeRes.supported_compute_types_cpu.includes("int8"), "CPU supports fallback 'int8'");
+      assert(Boolean(probeRes.faster_whisper_version), "Faster-Whisper version reported");
+      assert(Boolean(probeRes.ctranslate2_version), "CTranslate2 version reported");
+
+      // 39.2 Real Worker Ping / Pong over JSON Lines
+      const pingRes = await sendRequestToWorker({ id: "ping-test-1", type: "ping" });
+      assert(pingRes.type === "pong", "Worker ping returns pong over JSON Lines");
+      assert(pingRes.success === true, "Ping response reports success: true");
+
+      // 39.3 Parameter Validation
+      const defaultTxParams = validateTranscriptionParameters({});
+      assert(defaultTxParams.modelName === "small", "Default model is 'small'");
+      assert(defaultTxParams.device === "auto", "Default device is 'auto'");
+
+      // Reject invalid modelName via API
+      const invalidModelRes = await fetch(
+        `${baseUrl}/api/projects/${projectId}/media/${silenceMidAsset.assetId}/transcription`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ modelName: "large-v3" })
+        }
+      );
+      assert(invalidModelRes.status === 400, "Reject invalid modelName with 400 Bad Request");
+
+      // Reject invalid languageHint via API
+      const invalidLangRes = await fetch(
+        `${baseUrl}/api/projects/${projectId}/media/${silenceMidAsset.assetId}/transcription`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ languageHint: "invalid-long-code" })
+        }
+      );
+      assert(invalidLangRes.status === 400, "Reject invalid languageHint with 400 Bad Request");
+
+      // Reject invalid device via API
+      const invalidDeviceRes = await fetch(
+        `${baseUrl}/api/projects/${projectId}/media/${silenceMidAsset.assetId}/transcription`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ device: "tpu" })
+        }
+      );
+      assert(invalidDeviceRes.status === 400, "Reject invalid device with 400 Bad Request");
+
+      // 39.4 Missing Audio Extraction Prerequisite Rejection
+      const txUnextractedRes = await fetch(
+        `${baseUrl}/api/projects/${projectId}/media/${unextractedAssetId}/transcription`,
+        { method: "POST" }
+      );
+      assert(txUnextractedRes.status === 400, "Reject transcription on unextracted asset with 400");
+      const txUnextractedJson = (await txUnextractedRes.json()) as any;
+      assert(
+        txUnextractedJson.error?.includes("extract audio before"),
+        "Error instructs client to extract audio first"
+      );
+
+      // 39.5 Missing Physical WAV on Disk
+      const resMissingTxWav = await fetch(
+        `${baseUrl}/api/projects/${projectId}/media/${missingWavAsset.assetId}/transcription`,
+        { method: "POST" }
+      );
+      assert(resMissingTxWav.status === 400, "Missing physical WAV returns 400 Bad Request for transcription");
+
+      // 39.6 Transcript Data Validation Rules
+      const validMockTranscript = {
+        language: "en",
+        language_probability: 0.985,
+        duration: 3.0,
+        segments: [
+          { id: 0, start: 0.0, end: 1.5, text: "Hello world", words: [{ word: "Hello", start: 0.0, end: 0.7 }, { word: "world", start: 0.7, end: 1.5 }] },
+          { id: 1, start: 1.5, end: 3.0, text: "AgentCut transcription test", words: [{ word: "AgentCut", start: 1.5, end: 2.2 }] }
+        ],
+        text: "Hello world AgentCut transcription test"
+      };
+      const validatedData = validateTranscriptData(validMockTranscript, 3.0);
+      assert(validatedData.segments.length === 2, "validateTranscriptData accepts valid segments");
+
+      // Reject negative start
+      let threwNegative = false;
+      try {
+        validateTranscriptData({ segments: [{ id: 0, start: -1, end: 1, text: "bad" }] }, 3.0);
+      } catch (err: any) {
+        threwNegative = /invalid start timestamp/i.test(err?.message || "");
+      }
+      assert(threwNegative, "validateTranscriptData throws on negative start timestamp");
+
+      // Reject end < start
+      let threwEndBeforeStart = false;
+      try {
+        validateTranscriptData({ segments: [{ id: 0, start: 2.0, end: 1.0, text: "bad" }] }, 3.0);
+      } catch (err: any) {
+        threwEndBeforeStart = /invalid end timestamp/i.test(err?.message || "");
+      }
+      assert(threwEndBeforeStart, "validateTranscriptData throws when end < start");
+
+      // Reject start exceeding duration
+      let threwExceeds = false;
+      try {
+        validateTranscriptData({ segments: [{ id: 0, start: 10.0, end: 12.0, text: "bad" }] }, 3.0);
+      } catch (err: any) {
+        threwExceeds = /exceeds audio duration/i.test(err?.message || "");
+      }
+      assert(threwExceeds, "validateTranscriptData throws when start exceeds audio duration");
+
+      // Reject end exceeding audio duration (exceeding tolerance)
+      let threwEndExceeds = false;
+      try {
+        validateTranscriptData({ segments: [{ id: 0, start: 1.0, end: 5.0, text: "bad" }] }, 3.0);
+      } catch (err: any) {
+        threwEndExceeds = /end .* exceeds audio duration limit/i.test(err?.message || "");
+      }
+      assert(threwEndExceeds, "validateTranscriptData throws when end exceeds audio duration limit");
+
+      // Reject non-finite timestamps
+      let threwNonFinite = false;
+      try {
+        validateTranscriptData({ segments: [{ id: 0, start: Infinity, end: 2.0, text: "bad" }] }, 3.0);
+      } catch (err: any) {
+        threwNonFinite = /invalid start timestamp/i.test(err?.message || "");
+      }
+      assert(threwNonFinite, "validateTranscriptData throws when start timestamp is non-finite");
+
+      // Reject segments not chronologically ordered
+      let threwChronological = false;
+      try {
+        validateTranscriptData(
+          {
+            segments: [
+              { id: 0, start: 2.0, end: 2.5, text: "first" },
+              { id: 1, start: 1.0, end: 1.5, text: "second" }
+            ]
+          },
+          3.0
+        );
+      } catch (err: any) {
+        threwChronological = /chronologically ordered/i.test(err?.message || "");
+      }
+      assert(threwChronological, "validateTranscriptData throws when segments are not chronologically ordered");
+
+      // Reject word timestamp exceeding parent segment bounds
+      let threwWordOutOfBounds = false;
+      try {
+        validateTranscriptData(
+          {
+            segments: [
+              {
+                id: 0,
+                start: 1.0,
+                end: 2.0,
+                text: "hello",
+                words: [{ word: "hello", start: 0.1, end: 2.9 }]
+              }
+            ]
+          },
+          3.0
+        );
+      } catch (err: any) {
+        threwWordOutOfBounds = /exceeds parent segment boundaries/i.test(err?.message || "");
+      }
+      assert(threwWordOutOfBounds, "validateTranscriptData throws when word timestamp exceeds parent segment boundaries");
+
+      // 39.7 Lifecycle & Atomic Artifact Persistence with Deterministic Mock Handler
+      setMockWorkerHandler(async (req) => {
+        if (req.type === "transcribe") {
+          return {
+            id: req.id,
+            type: "transcribe",
+            success: true,
+            language: req.language || "en",
+            language_probability: 0.99,
+            duration: 3.0,
+            segment_count: 2,
+            segments: [
+              {
+                id: 0,
+                start: 0.0,
+                end: 0.8,
+                text: "AgentCut video intelligence foundation.",
+                words: [
+                  { word: "AgentCut", start: 0.0, end: 0.3, probability: 0.99 },
+                  { word: "video", start: 0.3, end: 0.5, probability: 0.98 },
+                  { word: "intelligence", start: 0.5, end: 0.7, probability: 0.97 },
+                  { word: "foundation", start: 0.7, end: 0.8, probability: 0.99 }
+                ]
+              },
+              {
+                id: 1,
+                start: 0.9,
+                end: 1.8,
+                text: "Local multilingual transcription.",
+                words: [
+                  { word: "Local", start: 0.9, end: 1.2, probability: 0.98 },
+                  { word: "multilingual", start: 1.2, end: 1.5, probability: 0.97 },
+                  { word: "transcription", start: 1.5, end: 1.8, probability: 0.99 }
+                ]
+              }
+            ],
+            text: "AgentCut video intelligence foundation. Local multilingual transcription.",
+            execution_device: req.device === "cpu" ? "cpu" : "cuda",
+            compute_type: req.device === "cpu" ? "int8" : "int8_float16",
+            model_name: req.model_name || "small"
+          };
+        }
+        return null;
+      });
+
+      const txRes1 = await fetch(
+        `${baseUrl}/api/projects/${projectId}/media/${silenceMidAsset.assetId}/transcription`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ modelName: "small" })
+        }
+      );
+      assert(txRes1.status === 200, "POST transcription returns 200 OK");
+      const txData1 = ((await txRes1.json()) as any).data;
+      assert(txData1.status === "completed", "Transcription status transitions to 'completed'");
+      assert(txData1.segmentCount === 2, "Transcription artifact reports segmentCount = 2");
+      assert(txData1.detectedLanguage === "en", "Detected language is 'en'");
+      assert(txData1.executionDevice === "cuda", "Execution device recorded as 'cuda'");
+      assert(txData1.computeType === "int8_float16", "Compute type recorded as 'int8_float16'");
+
+      // Verify physical transcript artifact exists on disk
+      const transcriptDiskPath = resolveAssetTranscriptPath(projectId, silenceMidAsset.assetId);
+      assert(fs.existsSync(transcriptDiskPath), "Atomic transcript.json persisted at expected analysis path");
+      const parsedTranscriptDisk = JSON.parse(fs.readFileSync(transcriptDiskPath, "utf-8"));
+      assert(parsedTranscriptDisk.segments.length === 2, "Persisted transcript.json contains valid segments");
+
+      // 39.8 Hindi Language Hint Test
+      const txHindiRes = await fetch(
+        `${baseUrl}/api/projects/${projectId}/media/${silenceStartAsset.assetId}/transcription`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ modelName: "small", languageHint: "hi" })
+        }
+      );
+      assert(txHindiRes.status === 200, "POST transcription with Hindi hint returns 200 OK");
+      const txHindiData = ((await txHindiRes.json()) as any).data;
+      assert(txHindiData.parameters.languageHint === "hi", "Persisted languageHint is 'hi'");
+
+      // 39.9 Concurrency Deduplication
+      const [concTxA, concTxB] = await Promise.all([
+        requestTranscription(projectId, silenceEndAsset.assetId, { modelName: "small" }),
+        requestTranscription(projectId, silenceEndAsset.assetId, { modelName: "small" })
+      ]);
+      assert(concTxA.id === concTxB.id, "Concurrent transcription calls return identical artifact");
+
+      // 39.10 Idempotency & Cache Reuse
+      const txRepeatRes = await fetch(
+        `${baseUrl}/api/projects/${projectId}/media/${silenceMidAsset.assetId}/transcription`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ modelName: "small" })
+        }
+      );
+      assert(txRepeatRes.status === 200, "Repeated POST transcription returns 200 OK");
+      const txRepeatData = ((await txRepeatRes.json()) as any).data;
+      assert(txRepeatData.completedAt === txData1.completedAt, "Cached transcription returned without re-running");
+
+      // 39.11 Reanalysis on Model Change
+      const txReanalysisRes = await fetch(
+        `${baseUrl}/api/projects/${projectId}/media/${silenceMidAsset.assetId}/transcription`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ modelName: "base" })
+        }
+      );
+      assert(txReanalysisRes.status === 200, "Reanalysis with different model returns 200 OK");
+      const txReanalysisData = ((await txReanalysisRes.json()) as any).data;
+      assert(txReanalysisData.parameters.modelName === "base", "Updated model 'base' persisted");
+
+      // 39.12 GET Transcription Endpoints & Path Masking
+      const getTxRes = await fetch(
+        `${baseUrl}/api/projects/${projectId}/media/${silenceMidAsset.assetId}/transcription`
+      );
+      assert(getTxRes.status === 200, "GET transcription returns 200 OK");
+      const getTxJson = (await getTxRes.json()) as any;
+      assert(getTxJson.data.status === "completed", "GET returned status 'completed'");
+      assert(Boolean(getTxJson.data.transcript), "GET includes full parsed transcript object");
+      assert(getTxJson.data.transcript.segments.length > 0, "GET transcript contains segments");
+      const rawTxPayload = JSON.stringify(getTxJson);
+      assert(!rawTxPayload.includes("C:\\") && !rawTxPayload.includes("/Users/"), "API payload strictly masks internal server filesystem paths");
+
+      // GET by specific transcriptionId
+      const getTxByIdRes = await fetch(
+        `${baseUrl}/api/projects/${projectId}/media/${silenceMidAsset.assetId}/transcription/${txData1.id}`
+      );
+      assert(getTxByIdRes.status === 200, "GET transcription by ID returns 200 OK");
+
+      // 39.13 Cancellation
+      let delayResolve: ((val: any) => void) | null = null;
+      setMockWorkerHandler(async (req) => {
+        if (req.type === "transcribe") {
+          return new Promise((resolve) => {
+            delayResolve = resolve;
+          });
+        }
+        return null;
+      });
+
+      const cancelAsset = await setupSyntheticAssetWithAudio(
+        "tx_cancel_test",
+        ["-f", "lavfi", "-i", "anullsrc=sample_rate=16000:duration=2:channel_layout=mono"],
+        "[0:a]anull[outa]"
+      );
+      const inFlightTxPromise = requestTranscription(projectId, cancelAsset.assetId, { modelName: "small" });
+
+      // Wait until transcription is active
+      let isTxActive = false;
+      for (let i = 0; i < 50; i++) {
+        if (isTranscriptionActive(cancelAsset.assetId)) {
+          isTxActive = true;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      assert(isTxActive, "isTranscriptionActive returns true while transcription is active");
+
+      // Cancel the active job
+      const didCancelTx = await cancelTranscription(projectId, cancelAsset.assetId);
+      assert(didCancelTx, "cancelTranscription returns true for in-flight job");
+      assert(!isTranscriptionActive(cancelAsset.assetId), "isTranscriptionActive returns false immediately after cancellation");
+
+      // Release delayed worker if still pending
+      if (delayResolve) {
+        (delayResolve as any)({ id: "dummy", type: "transcribe", success: true, segments: [] });
+      }
+
+      let txCancelErrorCaught = false;
+      try {
+        await inFlightTxPromise;
+      } catch {
+        txCancelErrorCaught = true;
+      }
+      assert(txCancelErrorCaught, "In-flight transcription promise rejects upon cancellation");
+
+      const postCancelDoc = await transcriptionsCol.findOne({ projectId, assetId: cancelAsset.assetId });
+      assert(postCancelDoc?.status === "canceled", "MongoDB record status updated to 'canceled'");
+
+      // 39.14 Worker Failure Handling
+      setMockWorkerHandler(async (req) => {
+        if (req.type === "transcribe") {
+          return {
+            id: req.id,
+            type: "transcribe",
+            success: false,
+            error: "Simulated worker out-of-memory error."
+          };
+        }
+        return null;
+      });
+
+      const failAsset = await setupSyntheticAssetWithAudio(
+        "tx_fail_test",
+        ["-f", "lavfi", "-i", "anullsrc=sample_rate=16000:duration=2:channel_layout=mono"],
+        "[0:a]anull[outa]"
+      );
+      let workerFailureCaught = false;
+      try {
+        await requestTranscription(projectId, failAsset.assetId, { modelName: "small" });
+      } catch {
+        workerFailureCaught = true;
+      }
+      assert(workerFailureCaught, "requestTranscription throws when worker reports error");
+      const failedDoc = await transcriptionsCol.findOne({ projectId, assetId: failAsset.assetId });
+      assert(failedDoc?.status === "failed", "MongoDB record reflects 'failed' status");
+      assert(failedDoc?.error?.includes("out-of-memory"), "Error details saved in MongoDB record");
+
+      // 39.15 Cross-Project Access Rejection
+      const crossTxRes = await fetch(
+        `${baseUrl}/api/projects/${project2Id}/media/${silenceMidAsset.assetId}/transcription`,
+        { method: "POST" }
+      );
+      assert(crossTxRes.status === 404, "Cross-project transcription returns 404 Not Found");
+
+      const crossGetTxRes = await fetch(
+        `${baseUrl}/api/projects/${project2Id}/media/${silenceMidAsset.assetId}/transcription`
+      );
+      assert(crossGetTxRes.status === 404, "Cross-project GET transcription returns 404 Not Found");
+
+      // Reset mock worker handler back to null
+      setMockWorkerHandler(null);
+
+      // 39.16 Worker Clean Shutdown & Process Lifecycle
+      await stopWorker();
+      assert(!isWorkerAlive(), "Worker process terminates cleanly without orphan processes");
+
+      // ----------------------------------------------------
       // 24. Project Deletion: Removes Timeline Metadata & Preserves Files
       // ----------------------------------------------------
       console.log("\n[Test 24] Project Deletion: Removes Timeline Metadata & Preserves Local Files");
@@ -1910,6 +2338,10 @@ async function runTests() {
       // Confirm silence detection metadata exists in DB before project deletion
       const silenceBefore = await silenceDetectionsCol.find({ projectId }).toArray();
       assert(silenceBefore.length > 0, "Silence detection metadata exists in MongoDB before project deletion");
+
+      // Confirm transcription metadata exists in DB before project deletion
+      const transcriptionsBefore = await transcriptionsCol.find({ projectId }).toArray();
+      assert(transcriptionsBefore.length > 0, "Transcription metadata exists in MongoDB before project deletion");
 
       // Create a render job for project 2 to verify cross-project isolation during deletion
       const otherProjectJobId = new ObjectId().toHexString();
@@ -1964,6 +2396,10 @@ async function runTests() {
       // Check silence detection metadata deleted for deleted project
       const remainingSilenceDocs = await silenceDetectionsCol.find({ projectId }).toArray();
       assert(remainingSilenceDocs.length === 0, "Associated silence detection metadata records removed from MongoDB upon project deletion");
+
+      // Check transcription metadata deleted for deleted project
+      const remainingTxDocs = await transcriptionsCol.find({ projectId }).toArray();
+      assert(remainingTxDocs.length === 0, "Associated transcription metadata records removed from MongoDB upon project deletion");
 
       // Check render job metadata belonging to project 2 remains intact
       const otherJobStillExists = await renderJobsCol.findOne({ jobId: otherProjectJobId });

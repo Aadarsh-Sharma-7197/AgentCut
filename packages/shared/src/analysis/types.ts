@@ -49,3 +49,62 @@ export interface SilenceDetectionArtifact {
   updatedAt: string;
 }
 
+export type TranscriptionStatus = "queued" | "processing" | "completed" | "failed" | "canceled";
+export type TranscriptionDevice = "cuda" | "cpu";
+
+export interface TranscriptWord {
+  word: string;
+  start: number;
+  end: number;
+  probability?: number;
+}
+
+export interface TranscriptSegment {
+  id: number;
+  start: number;
+  end: number;
+  text: string;
+  words?: TranscriptWord[];
+}
+
+export interface TranscriptData {
+  language: string;
+  languageProbability?: number;
+  duration: number;
+  segments: TranscriptSegment[];
+  text: string;
+}
+
+export interface TranscriptionParameters {
+  modelName: "small" | "base";
+  languageHint?: string;
+  device?: "auto" | "cuda" | "cpu";
+  computeType?: string;
+}
+
+export interface TranscriptionArtifact {
+  id: string;
+  projectId: string;
+  assetId: string;
+  status: TranscriptionStatus;
+  parameters: TranscriptionParameters;
+  detectedLanguage?: string;
+  languageProbability?: number;
+  audioDuration?: number;
+  segmentCount?: number;
+  executionDevice?: TranscriptionDevice;
+  computeType?: string;
+  engineMetadata?: {
+    engine: string;
+    version?: string;
+  };
+  error?: string;
+  completedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TranscriptionWithTranscript extends TranscriptionArtifact {
+  transcript?: TranscriptData;
+}
+

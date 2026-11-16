@@ -15,6 +15,7 @@ import * as projectService from "../services/project.service.js";
 import * as mediaService from "../services/media.service.js";
 import * as audioExtractionService from "../services/audio-extraction.service.js";
 import * as silenceDetectionService from "../services/silence-detection.service.js";
+import * as transcriptionService from "../services/transcription.service.js";
 import { resolveAssetAnalysisAudioPath } from "../config/storage.js";
 
 // Multer storage engine to save files directly into the project's media folder with a UUID
@@ -481,6 +482,157 @@ export async function getSilenceDetectionHandler(req: Request, res: Response): P
   } catch (err: unknown) {
     console.error("[MediaController] getSilenceDetection error:", err);
     res.status(500).json({ error: "Failed to retrieve silence detection metadata." });
+  }
+}
+
+/**
+ * Handles requesting multilingual transcription for a media asset using its extracted WAV artifact.
+ */
+export async function requestTranscriptionHandler(req: Request, res: Response): Promise<void> {
+  const { projectId, assetId } = req.params;
+
+  if (
+    typeof projectId !== "string" ||
+    !ObjectId.isValid(projectId) ||
+    typeof assetId !== "string" ||
+    !ObjectId.isValid(assetId)
+  ) {
+    res.status(400).json({ error: "Invalid project ID or asset ID format." });
+    return;
+  }
+
+  const project = await projectService.getProjectById(projectId);
+  if (!project) {
+    res.status(404).json({ error: "Project not found." });
+    return;
+  }
+
+  const mediaAsset = await mediaService.getMediaAssetById(projectId, assetId);
+  if (!mediaAsset) {
+    res.status(404).json({ error: "Media asset not found in this project." });
+    return;
+  }
+
+  const { modelName, languageHint, device, computeType } = req.body || {};
+
+  try {
+    const artifact = await transcriptionService.requestTranscription(projectId, assetId, {
+      modelName,
+      languageHint,
+      device,
+      computeType
+    });
+    res.status(200).json({ data: artifact });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Transcription failed.";
+    if (
+      message.includes("extract audio before") ||
+      message.includes("Invalid modelName") ||
+      message.includes("Invalid languageHint") ||
+      message.includes("Invalid device")
+    ) {
+      res.status(400).json({ error: message });
+      return;
+    }
+    res.status(500).json({ error: message });
+  }
+}
+
+/**
+ * Retrieves transcription metadata and transcript for a media asset.
+ */
+export async function getTranscriptionHandler(req: Request, res: Response): Promise<void> {
+  const { projectId, assetId } = req.params;
+  const rawTxId = req.params.transcriptionId;
+  const transcriptionId = typeof rawTxId === "string" ? rawTxId : undefined;
+
+  if (
+    typeof projectId !== "string" ||
+    !ObjectId.isValid(projectId) ||
+    typeof assetId !== "string" ||
+    !ObjectId.isValid(assetId) ||
+    (rawTxId !== undefined && (!transcriptionId || !ObjectId.isValid(transcriptionId)))
+  ) {
+    res.status(400).json({ error: "Invalid project ID, asset ID, or transcription ID format." });
+    return;
+  }
+
+  const project = await projectService.getProjectById(projectId);
+  if (!project) {
+    res.status(404).json({ error: "Project not found." });
+    return;
+  }
+
+  const mediaAsset = await mediaService.getMediaAssetById(projectId, assetId);
+  if (!mediaAsset) {
+    res.status(404).json({ error: "Media asset not found in this project." });
+    return;
+  }
+
+  try {
+    const result = await transcriptionService.getTranscriptionWithTranscript(
+      projectId,
+      assetId,
+      transcriptionId
+    );
+    if (!result) {
+      res.status(404).json({ error: "Transcription not found for this media asset." });
+      return;
+    }
+
+    res.status(200).json({ data: result });
+  } catch (err: unknown) {
+    console.error("[MediaController] getTranscription error:", err);
+    res.status(500).json({ error: "Failed to retrieve transcription." });
+  }
+}
+
+/**
+ * Cancels an active transcription job.
+ */
+export async function cancelTranscriptionHandler(req: Request, res: Response): Promise<void> {
+  const { projectId, assetId } = req.params;
+  const rawTxId = req.params.transcriptionId;
+  const transcriptionId = typeof rawTxId === "string" ? rawTxId : undefined;
+
+  if (
+    typeof projectId !== "string" ||
+    !ObjectId.isValid(projectId) ||
+    typeof assetId !== "string" ||
+    !ObjectId.isValid(assetId) ||
+    (rawTxId !== undefined && (!transcriptionId || !ObjectId.isValid(transcriptionId)))
+  ) {
+    res.status(400).json({ error: "Invalid project ID, asset ID, or transcription ID format." });
+    return;
+  }
+
+  const project = await projectService.getProjectById(projectId);
+  if (!project) {
+    res.status(404).json({ error: "Project not found." });
+    return;
+  }
+
+  const mediaAsset = await mediaService.getMediaAssetById(projectId, assetId);
+  if (!mediaAsset) {
+    res.status(404).json({ error: "Media asset not found in this project." });
+    return;
+  }
+
+  try {
+    const canceled = await transcriptionService.cancelTranscription(
+      projectId,
+      assetId,
+      transcriptionId
+    );
+    if (!canceled) {
+      res.status(404).json({ error: "No active transcription found to cancel." });
+      return;
+    }
+
+    res.status(200).json({ message: "Transcription canceled successfully." });
+  } catch (err: unknown) {
+    console.error("[MediaController] cancelTranscription error:", err);
+    res.status(500).json({ error: "Failed to cancel transcription." });
   }
 }
 

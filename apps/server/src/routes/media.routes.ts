@@ -10,7 +10,10 @@ import {
   getAudioExtractionHandler,
   streamAudioExtractionHandler,
   detectSilenceHandler,
-  getSilenceDetectionHandler
+  getSilenceDetectionHandler,
+  requestTranscriptionHandler,
+  getTranscriptionHandler,
+  cancelTranscriptionHandler
 } from "../controllers/media.controller.js";
 
 export const mediaRouter = Router({ mergeParams: true });
@@ -48,3 +51,11 @@ mediaRouter.post("/:assetId/silence", detectSilenceHandler);
 mediaRouter.post("/:assetId/detect-silence", detectSilenceHandler);
 mediaRouter.get("/:assetId/silence", getSilenceDetectionHandler);
 mediaRouter.get("/:assetId/silence/status", getSilenceDetectionHandler);
+
+// Multilingual transcription routes
+mediaRouter.post("/:assetId/transcription", requestTranscriptionHandler);
+mediaRouter.post("/:assetId/transcribe", requestTranscriptionHandler);
+mediaRouter.get("/:assetId/transcription", getTranscriptionHandler);
+mediaRouter.get("/:assetId/transcription/:transcriptionId", getTranscriptionHandler);
+mediaRouter.post("/:assetId/transcription/cancel", cancelTranscriptionHandler);
+mediaRouter.post("/:assetId/transcription/:transcriptionId/cancel", cancelTranscriptionHandler);

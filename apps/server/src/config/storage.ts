@@ -145,4 +145,54 @@ export function resolveAssetAnalysisTempAudioPath(projectId: string, assetId: st
   return resolved;
 }
 
+export function getWhisperModelsDir(): string {
+  const configured = process.env.WHISPER_MODELS_DIR || process.env.AGENTCUT_MODELS_DIR;
+  if (configured) {
+    return path.resolve(configured);
+  }
+  const root = getDataDir();
+  const modelsDir = path.join(root, "models", "whisper");
+  if (!fs.existsSync(modelsDir)) {
+    fs.mkdirSync(modelsDir, { recursive: true });
+  }
+  return modelsDir;
+}
+
+export function getAssetTranscriptionDir(projectId: string, assetId: string): string {
+  const assetDir = getAssetAnalysisDir(projectId, assetId);
+  const transcriptionDir = path.join(assetDir, "transcription");
+  const resolved = path.resolve(transcriptionDir);
+
+  if (!resolved.startsWith(assetDir + path.sep)) {
+    throw new Error("Invalid transcription path: path traversal detected.");
+  }
+
+  if (!fs.existsSync(resolved)) {
+    fs.mkdirSync(resolved, { recursive: true });
+  }
+
+  return resolved;
+}
+
+export function resolveAssetTranscriptPath(projectId: string, assetId: string): string {
+  const transcriptionDir = getAssetTranscriptionDir(projectId, assetId);
+  const resolved = path.resolve(transcriptionDir, "transcript.json");
+
+  if (!resolved.startsWith(transcriptionDir + path.sep)) {
+    throw new Error("Invalid transcript path: path traversal detected.");
+  }
+
+  return resolved;
+}
+
+export function resolveAssetTranscriptTempPath(projectId: string, assetId: string, jobId: string): string {
+  const transcriptionDir = getAssetTranscriptionDir(projectId, assetId);
+  const resolved = path.resolve(transcriptionDir, `transcript.${jobId}.tmp.json`);
+
+  if (!resolved.startsWith(transcriptionDir + path.sep)) {
+    throw new Error("Invalid temp transcript path: path traversal detected.");
+  }
+
+  return resolved;
+}
 
