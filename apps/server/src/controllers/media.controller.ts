@@ -18,6 +18,8 @@ import * as silenceDetectionService from "../services/silence-detection.service.
 import * as transcriptionService from "../services/transcription.service.js";
 import * as sceneDetectionService from "../services/scene-detection.service.js";
 import * as mediaIntelligenceService from "../services/media-intelligence.service.js";
+import * as mediaIndexService from "../services/media-index.service.js";
+import { SearchError } from "../services/media-index.service.js";
 import { resolveAssetAnalysisAudioPath } from "../config/storage.js";
 
 // Multer storage engine to save files directly into the project's media folder with a UUID
@@ -935,6 +937,200 @@ export async function getMediaIntelligenceTimelineHandler(req: Request, res: Res
     }
     console.error("[MediaController] getMediaIntelligenceTimeline error:", err);
     res.status(500).json({ error: "Failed to retrieve media intelligence timeline." });
+  }
+}
+
+/**
+ * Step 5.6: Searches speech dialogue within a media asset.
+ */
+export async function searchAssetSpeechHandler(req: Request, res: Response): Promise<void> {
+  const { projectId, assetId } = req.params;
+
+  if (
+    typeof projectId !== "string" ||
+    !ObjectId.isValid(projectId) ||
+    typeof assetId !== "string" ||
+    !ObjectId.isValid(assetId)
+  ) {
+    res.status(400).json({ error: "Invalid project ID or asset ID format." });
+    return;
+  }
+
+  const project = await projectService.getProjectById(projectId);
+  if (!project) {
+    res.status(404).json({ error: "Project not found." });
+    return;
+  }
+
+  const mediaAsset = await mediaService.getMediaAssetById(projectId, assetId);
+  if (!mediaAsset) {
+    res.status(404).json({ error: "Media asset not found in this project." });
+    return;
+  }
+
+  try {
+    const result = await mediaIndexService.searchAssetSpeech(projectId, assetId, req.query);
+    res.status(200).json({ data: result });
+  } catch (err: unknown) {
+    if (err instanceof SearchError) {
+      res.status(err.statusCode).json({ error: err.message });
+      return;
+    }
+    console.error("[MediaController] searchAssetSpeech error:", err);
+    res.status(500).json({ error: "Failed to search speech dialogue." });
+  }
+}
+
+/**
+ * Step 5.6: Searches silence intervals within a media asset.
+ */
+export async function searchAssetSilenceHandler(req: Request, res: Response): Promise<void> {
+  const { projectId, assetId } = req.params;
+
+  if (
+    typeof projectId !== "string" ||
+    !ObjectId.isValid(projectId) ||
+    typeof assetId !== "string" ||
+    !ObjectId.isValid(assetId)
+  ) {
+    res.status(400).json({ error: "Invalid project ID or asset ID format." });
+    return;
+  }
+
+  const project = await projectService.getProjectById(projectId);
+  if (!project) {
+    res.status(404).json({ error: "Project not found." });
+    return;
+  }
+
+  const mediaAsset = await mediaService.getMediaAssetById(projectId, assetId);
+  if (!mediaAsset) {
+    res.status(404).json({ error: "Media asset not found in this project." });
+    return;
+  }
+
+  try {
+    const result = await mediaIndexService.searchAssetSilence(projectId, assetId, req.query);
+    res.status(200).json({ data: result });
+  } catch (err: unknown) {
+    if (err instanceof SearchError) {
+      res.status(err.statusCode).json({ error: err.message });
+      return;
+    }
+    console.error("[MediaController] searchAssetSilence error:", err);
+    res.status(500).json({ error: "Failed to search silence intervals." });
+  }
+}
+
+/**
+ * Step 5.6: Searches scene boundaries within a media asset.
+ */
+export async function searchAssetScenesHandler(req: Request, res: Response): Promise<void> {
+  const { projectId, assetId } = req.params;
+
+  if (
+    typeof projectId !== "string" ||
+    !ObjectId.isValid(projectId) ||
+    typeof assetId !== "string" ||
+    !ObjectId.isValid(assetId)
+  ) {
+    res.status(400).json({ error: "Invalid project ID or asset ID format." });
+    return;
+  }
+
+  const project = await projectService.getProjectById(projectId);
+  if (!project) {
+    res.status(404).json({ error: "Project not found." });
+    return;
+  }
+
+  const mediaAsset = await mediaService.getMediaAssetById(projectId, assetId);
+  if (!mediaAsset) {
+    res.status(404).json({ error: "Media asset not found in this project." });
+    return;
+  }
+
+  try {
+    const result = await mediaIndexService.searchAssetScenes(projectId, assetId, req.query);
+    res.status(200).json({ data: result });
+  } catch (err: unknown) {
+    if (err instanceof SearchError) {
+      res.status(err.statusCode).json({ error: err.message });
+      return;
+    }
+    console.error("[MediaController] searchAssetScenes error:", err);
+    res.status(500).json({ error: "Failed to search scene boundaries." });
+  }
+}
+
+/**
+ * Step 5.6: Unified asset search (speech search enriched with containing scene context).
+ */
+export async function searchAssetUnifiedHandler(req: Request, res: Response): Promise<void> {
+  const { projectId, assetId } = req.params;
+
+  if (
+    typeof projectId !== "string" ||
+    !ObjectId.isValid(projectId) ||
+    typeof assetId !== "string" ||
+    !ObjectId.isValid(assetId)
+  ) {
+    res.status(400).json({ error: "Invalid project ID or asset ID format." });
+    return;
+  }
+
+  const project = await projectService.getProjectById(projectId);
+  if (!project) {
+    res.status(404).json({ error: "Project not found." });
+    return;
+  }
+
+  const mediaAsset = await mediaService.getMediaAssetById(projectId, assetId);
+  if (!mediaAsset) {
+    res.status(404).json({ error: "Media asset not found in this project." });
+    return;
+  }
+
+  try {
+    const result = await mediaIndexService.searchAssetUnified(projectId, assetId, req.query);
+    res.status(200).json({ data: result });
+  } catch (err: unknown) {
+    if (err instanceof SearchError) {
+      res.status(err.statusCode).json({ error: err.message });
+      return;
+    }
+    console.error("[MediaController] searchAssetUnified error:", err);
+    res.status(500).json({ error: "Failed to perform unified asset search." });
+  }
+}
+
+/**
+ * Step 5.6: Project-wide cross-asset dialogue search.
+ */
+export async function searchProjectIntelligenceHandler(req: Request, res: Response): Promise<void> {
+  const { projectId } = req.params;
+
+  if (typeof projectId !== "string" || !ObjectId.isValid(projectId)) {
+    res.status(400).json({ error: "Invalid project ID format." });
+    return;
+  }
+
+  const project = await projectService.getProjectById(projectId);
+  if (!project) {
+    res.status(404).json({ error: "Project not found." });
+    return;
+  }
+
+  try {
+    const result = await mediaIndexService.searchProjectIntelligence(projectId, req.query);
+    res.status(200).json({ data: result });
+  } catch (err: unknown) {
+    if (err instanceof SearchError) {
+      res.status(err.statusCode).json({ error: err.message });
+      return;
+    }
+    console.error("[MediaController] searchProjectIntelligence error:", err);
+    res.status(500).json({ error: "Failed to search project dialogue." });
   }
 }
 

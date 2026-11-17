@@ -263,3 +263,116 @@ export interface UnifiedTimelineResponse {
   slices: UnifiedTimelineSlice[];
 }
 
+// -------------------------------------------------------------
+// Step 5.6: Searchable Media Intelligence Types
+// -------------------------------------------------------------
+
+export interface SpeechSearchWord {
+  word: string;
+  start: number;
+  end: number;
+  probability?: number;
+}
+
+export interface SpeechSearchMatch {
+  id: string;
+  type: "speech";
+  assetId: string;
+  assetName: string;
+  start: number;
+  end: number;
+  matchedText: string;
+  segmentIds: number[];
+  segmentText: string;
+  words: SpeechSearchWord[];
+}
+
+export interface SpeechSearchResponse {
+  query: string;
+  assetId: string;
+  assetName: string;
+  totalMatches: number;
+  limit: number;
+  offset: number;
+  matches: SpeechSearchMatch[];
+}
+
+export interface SilenceSearchMatch {
+  id: string;
+  type: "silence";
+  assetId: string;
+  start: number;
+  end: number;
+  duration: number;
+}
+
+export interface SilenceSearchResponse {
+  assetId: string;
+  totalMatches: number;
+  limit: number;
+  offset: number;
+  matches: SilenceSearchMatch[];
+}
+
+export interface SceneSearchMatch {
+  id: string;
+  type: "scene";
+  assetId: string;
+  sceneIndex: number;
+  start: number;
+  end: number;
+  duration: number;
+  transitionType?: string;
+  frameUrl: string | null;
+}
+
+export interface SceneSearchResponse {
+  assetId: string;
+  totalMatches: number;
+  limit: number;
+  offset: number;
+  matches: SceneSearchMatch[];
+}
+
+export interface UnifiedSpeechSceneContext {
+  sceneId: string;
+  index: number;
+  start: number;
+  end: number;
+  frameUrl: string | null;
+}
+
+export interface UnifiedAssetSearchMatch extends SpeechSearchMatch {
+  scene: UnifiedSpeechSceneContext | null;
+}
+
+export interface UnifiedAssetSearchResponse {
+  query: string;
+  assetId: string;
+  assetName: string;
+  sceneContextAvailable: boolean;
+  totalMatches: number;
+  limit: number;
+  offset: number;
+  matches: UnifiedAssetSearchMatch[];
+}
+
+export interface UnsearchableAssetInfo {
+  assetId: string;
+  assetName: string;
+  reason: string;
+}
+
+export interface ProjectIntelligenceSearchResponse {
+  query: string;
+  projectId: string;
+  searchedAssetCount: number;
+  unsearchableAssetCount: number;
+  searchComplete: boolean;
+  unsearchableAssets: UnsearchableAssetInfo[];
+  totalMatches: number;
+  limit: number;
+  offset: number;
+  matches: SpeechSearchMatch[];
+}
+

@@ -102,6 +102,20 @@ import {
   MAX_RAW_BOUNDARY_CANDIDATES,
   MAX_UNIQUE_BOUNDARIES
 } from "./services/media-intelligence.service.js";
+import {
+  normalizeToken,
+  validateAndTokenizeQuery,
+  validatePagination,
+  validateTimeWindow,
+  validateDurationRange,
+  searchWordsInTranscript,
+  SearchError,
+  MAX_QUERY_STRING_LENGTH,
+  MAX_MATCH_BUDGET,
+  MAX_WORD_GAP_SECONDS,
+  MAX_AGGREGATE_ARTIFACT_READ_BYTES
+} from "./services/media-index.service.js";
+import type { TranscriptData, TranscriptWord } from "@agentcut/shared";
 import { ObjectId } from "mongodb";
 import type { Server } from "http";
 
@@ -3086,7 +3100,7 @@ frame=    3 fps=0.0 q=-0.0 Lsize=N/A time=00:00:03.04 bitrate=N/A
         createdAt: new Date(),
         updatedAt: new Date()
       });
-      const manifestProc = (await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence`)).json()).data;
+      const manifestProc = ((await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence`)).json()) as any).data;
       assert(manifestProc.overallStatus === "processing", "Modality extracting makes overallStatus processing");
 
       // Audio failed + Silence detecting -> overall remains processing
@@ -3103,7 +3117,7 @@ frame=    3 fps=0.0 q=-0.0 Lsize=N/A time=00:00:03.04 bitrate=N/A
         createdAt: new Date(),
         updatedAt: new Date()
       });
-      const manifestMixed = (await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence`)).json()).data;
+      const manifestMixed = ((await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence`)).json()) as any).data;
       assert(manifestMixed.overallStatus === "processing", "Mixed failed + active processing modality keeps overallStatus as processing");
 
       // Silence completed -> overall becomes partial
@@ -3120,14 +3134,14 @@ frame=    3 fps=0.0 q=-0.0 Lsize=N/A time=00:00:03.04 bitrate=N/A
           }
         }
       );
-      const manifestPartial = (await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence`)).json()).data;
+      const manifestPartial = ((await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence`)).json()) as any).data;
       assert(manifestPartial.overallStatus === "partial", "Completed silence detection makes overallStatus partial");
       assert(manifestPartial.aggregated.silenceDuration === 10.0, "Aggregated silenceDuration matches completed intervals");
 
       // 8. Integration Verification: Artifact Existence & Missing File Downgrades
       // Audio marked completed in DB, but WAV file missing on disk -> downgrades audio status to failed
       await audioExtractionsCol.updateOne({ projectId: intelProjId, assetId: intelAssetId }, { $set: { status: "completed" } });
-      const manifestAudioMissing = (await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence`)).json()).data;
+      const manifestAudioMissing = ((await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence`)).json()) as any).data;
       assert(manifestAudioMissing.modalities.audio.status === "failed", "Audio status downgraded to failed when audio.wav is missing on disk");
       assert(manifestAudioMissing.modalities.audio.hasArtifact === false, "audio hasArtifact is false when file missing");
       assert(!manifestAudioMissing.modalities.audio.error.includes("C:\\"), "Audio missing error does not expose filesystem paths");
@@ -3135,7 +3149,7 @@ frame=    3 fps=0.0 q=-0.0 Lsize=N/A time=00:00:03.04 bitrate=N/A
       // Create audio.wav on disk
       const intelAudioWavPath = resolveAssetAnalysisAudioPath(intelProjId, intelAssetId);
       fs.writeFileSync(intelAudioWavPath, "dummy wav data");
-      const manifestAudioPresent = (await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence`)).json()).data;
+      const manifestAudioPresent = ((await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence`)).json()) as any).data;
       assert(manifestAudioPresent.modalities.audio.status === "completed", "Audio status completed when audio.wav is confirmed on disk");
       assert(manifestAudioPresent.modalities.audio.hasArtifact === true, "audio hasArtifact is true when file present");
 
@@ -3175,7 +3189,7 @@ frame=    3 fps=0.0 q=-0.0 Lsize=N/A time=00:00:03.04 bitrate=N/A
         updatedAt: new Date()
       });
 
-      const manifestTx = (await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence`)).json()).data;
+      const manifestTx = ((await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence`)).json()) as any).data;
       assert(manifestTx.modalities.transcription.status === "completed", "Transcription status completed when transcript.json exists");
       assert(manifestTx.modalities.transcription.hasArtifact === true, "transcription hasArtifact is true");
       assert(manifestTx.modalities.transcription.wordCount === 3, "wordCount parsed correctly from transcript segments");
@@ -3216,13 +3230,13 @@ frame=    3 fps=0.0 q=-0.0 Lsize=N/A time=00:00:03.04 bitrate=N/A
       });
 
       // Manifest check with corrupt frame: scenes status must downgrade to failed
-      const manifestCorruptFrame = (await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence`)).json()).data;
+      const manifestCorruptFrame = ((await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence`)).json()) as any).data;
       assert(manifestCorruptFrame.modalities.scenes.status === "failed", "Scenes status downgrades to failed when a referenced frame is corrupted");
       assert(manifestCorruptFrame.modalities.scenes.error === "Scene frame artifact is missing or corrupted on server", "Sanitized error message for corrupted frame");
 
       // Timeline check with corrupt frame: frameUrl must be null for invalid frame, NOT a broken URL
       const timelineCorruptFrameRes = await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence/timeline?start=0&end=30`);
-      const timelineCorruptFrame = (await timelineCorruptFrameRes.json()).data;
+      const timelineCorruptFrame = ((await timelineCorruptFrameRes.json()) as any).data;
       const sliceWithCorruptScene = timelineCorruptFrame.slices.find((s: any) => s.scene?.sceneId === scene2Id);
       assert(sliceWithCorruptScene && sliceWithCorruptScene.scene.frameUrl === null, "frameUrl is null for structurally invalid scene frame");
 
@@ -3233,14 +3247,14 @@ frame=    3 fps=0.0 q=-0.0 Lsize=N/A time=00:00:03.04 bitrate=N/A
       fs.writeFileSync(scene2FramePath, validFrame2Buf);
 
       // Now all modalities completed! Overall status must become "completed"
-      const manifestAllDone = (await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence`)).json()).data;
+      const manifestAllDone = ((await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence`)).json()) as any).data;
       assert(manifestAllDone.modalities.scenes.status === "completed", "Scenes status completed when all frames pass structural validation");
       assert(manifestAllDone.overallStatus === "completed", "Overall status is completed when every applicable modality is completed");
 
       // 11. Integration Verification: Timeline Slicing & Boundary Math
       const timelineRes = await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence/timeline?start=15&end=25`);
       assert(timelineRes.status === 200, "GET /intelligence/timeline returns 200 OK");
-      const timelineData = (await timelineRes.json()).data;
+      const timelineData = ((await timelineRes.json()) as any).data;
 
       assert(timelineData.window.start === 15 && timelineData.window.end === 25 && timelineData.window.duration === 10, "Timeline window correctly parsed");
       assert(timelineData.slices.length > 0, "Timeline produced valid slices");
@@ -3282,7 +3296,7 @@ frame=    3 fps=0.0 q=-0.0 Lsize=N/A time=00:00:03.04 bitrate=N/A
       // Verify speech / silence coexistence:
       // Request window [10, 15] which is silence, and add a small speech word to verify coexistence
       const silenceWindowRes = await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence/timeline?start=10&end=15`);
-      const silenceWindowData = (await silenceWindowRes.json()).data;
+      const silenceWindowData = ((await silenceWindowRes.json()) as any).data;
       assert(silenceWindowData.slices.every((s: any) => s.isSilence === true), "Slices in silence window report isSilence: true");
 
       // 12. Integration Verification: Timeline Limit Enforcement & Error Handling
@@ -3293,13 +3307,13 @@ frame=    3 fps=0.0 q=-0.0 Lsize=N/A time=00:00:03.04 bitrate=N/A
       // Window > 3600 seconds
       const hugeWindowRes = await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence/timeline?start=0&end=3700`);
       assert(hugeWindowRes.status === 400, "Window > 3600s returns 400 Bad Request");
-      const hugeWindowJson = await hugeWindowRes.json();
+      const hugeWindowJson = (await hugeWindowRes.json()) as any;
       assert(hugeWindowJson.error.includes("exceeds maximum allowed duration"), "Error message explains window limit");
 
       // Invalid include token
       const badIncludeRes = await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${intelAssetId}/intelligence/timeline?include=scenes,video_extra`);
       assert(badIncludeRes.status === 400, "Invalid include token returns 400 Bad Request");
-      const badIncludeJson = await badIncludeRes.json();
+      const badIncludeJson = (await badIncludeRes.json()) as any;
       assert(badIncludeJson.error.includes("Invalid include parameter"), "Error message explains supported include values");
 
       // 13. Integration Verification: Confirmed No-Audio Asset Handling
@@ -3321,7 +3335,7 @@ frame=    3 fps=0.0 q=-0.0 Lsize=N/A time=00:00:03.04 bitrate=N/A
         createdAt: new Date()
       });
 
-      const noAudioManifest = (await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${noAudioAssetId}/intelligence`)).json()).data;
+      const noAudioManifest = ((await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${noAudioAssetId}/intelligence`)).json()) as any).data;
       assert(noAudioManifest.hasAudio === false, "Confirmed no-audio has hasAudio: false");
       assert(noAudioManifest.modalities.audio.status === "no_stream", "Audio modality status is no_stream");
       assert(noAudioManifest.modalities.silence.status === "no_stream", "Silence modality status is no_stream");
@@ -3354,7 +3368,7 @@ frame=    3 fps=0.0 q=-0.0 Lsize=N/A time=00:00:03.04 bitrate=N/A
       };
       await mediaAssetsCol.insertOne(unprobedDoc);
 
-      const probedManifest = (await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${unprobedAssetId}/intelligence`)).json()).data;
+      const probedManifest = ((await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${unprobedAssetId}/intelligence`)).json()) as any).data;
       assert(probedManifest.hasAudio === false, "In-memory FFprobe fallback identified no audio for validMp4");
       // Verify MongoDB document was NOT mutated
       const docAfterProbe = await mediaAssetsCol.findOne({ _id: new ObjectId(unprobedAssetId) });
@@ -3380,7 +3394,7 @@ frame=    3 fps=0.0 q=-0.0 Lsize=N/A time=00:00:03.04 bitrate=N/A
       };
       await mediaAssetsCol.insertOne(unknownDoc);
 
-      const unknownManifest = (await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${unknownAssetId}/intelligence`)).json()).data;
+      const unknownManifest = ((await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${unknownAssetId}/intelligence`)).json()) as any).data;
       assert(unknownManifest.hasAudio === null, "hasAudio is null (unknown) when file is inaccessible");
       assert(unknownManifest.modalities.audio.status === "not_started", "Audio modality reports not_started, not no_stream");
 
@@ -3401,7 +3415,7 @@ frame=    3 fps=0.0 q=-0.0 Lsize=N/A time=00:00:03.04 bitrate=N/A
         updatedAt: new Date()
       });
 
-      const unknownScenesDoneManifest = (await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${unknownAssetId}/intelligence`)).json()).data;
+      const unknownScenesDoneManifest = ((await (await fetch(`${baseUrl}/api/projects/${intelProjId}/media/${unknownAssetId}/intelligence`)).json()) as any).data;
       assert(unknownScenesDoneManifest.modalities.scenes.status === "completed", "Scenes modality is completed");
       assert(unknownScenesDoneManifest.overallStatus === "partial", "Overall status is partial, NEVER completed when audio availability is unknown");
 
@@ -3423,8 +3437,624 @@ frame=    3 fps=0.0 q=-0.0 Lsize=N/A time=00:00:03.04 bitrate=N/A
       } catch {}
 
       // ----------------------------------------------------
+      // 42. Searchable Media Intelligence & Retrieval APIs (Step 5.6)
+      // ----------------------------------------------------
+      console.log("\n[Test 42] Searchable Media Intelligence & Retrieval APIs (Step 5.6)");
+
+      // 42.1 Unit Verification: Token Normalization & Contractions Regression
+      assert(normalizeToken("don't,") === "don't", "normalizeToken strips trailing comma and preserves internal apostrophe");
+      assert(normalizeToken("state-of-the-art") === "state-of-the-art", "normalizeToken preserves internal hyphens in state-of-the-art");
+      assert(normalizeToken("(high-quality):") === "high-quality", "normalizeToken strips leading/trailing symbols and preserves high-quality");
+      assert(normalizeToken("'well-being'") === "well-being", "normalizeToken strips leading/trailing single quotes and preserves well-being");
+      assert(normalizeToken("IT'S") === "it's", "normalizeToken lowercases IT'S to it's");
+      assert(normalizeToken("...???") === "", "normalizeToken strips punctuation-only token to empty string");
+
+      // Query tokenizer
+      const validTokens = validateAndTokenizeQuery("  state-of-the-art   high-quality don't  ");
+      assert(validTokens.length === 3, "validateAndTokenizeQuery parses 3 valid tokens");
+      assert(validTokens[0] === "state-of-the-art" && validTokens[1] === "high-quality" && validTokens[2] === "don't", "validateAndTokenizeQuery preserves hyphens and apostrophes");
+
+      let punctOnlyThrew = false;
+      try {
+        validateAndTokenizeQuery("... ,,, ???");
+      } catch (err) {
+        if (err instanceof SearchError && err.statusCode === 400 && err.message.includes("at least one alphanumeric token")) {
+          punctOnlyThrew = true;
+        }
+      }
+      assert(punctOnlyThrew, "Punctuation-only query rejected with 400 Bad Request");
+
+      let emptyQueryThrew = false;
+      try {
+        validateAndTokenizeQuery("   ");
+      } catch (err) {
+        if (err instanceof SearchError && err.statusCode === 400) emptyQueryThrew = true;
+      }
+      assert(emptyQueryThrew, "Empty query string rejected with 400 Bad Request");
+
+      let longQueryThrew = false;
+      try {
+        validateAndTokenizeQuery("a".repeat(101));
+      } catch (err) {
+        if (err instanceof SearchError && err.statusCode === 400 && err.message.includes("maximum length of 100")) {
+          longQueryThrew = true;
+        }
+      }
+      assert(longQueryThrew, "Query exceeding 100 chars rejected with 400 Bad Request");
+
+      // Pagination & time window validators
+      assert(validatePagination().limit === 50 && validatePagination().offset === 0, "Default pagination is limit=50, offset=0");
+      let badLimitThrew = false;
+      try { validatePagination(0); } catch { badLimitThrew = true; }
+      assert(badLimitThrew, "limit < 1 throws 400");
+      let badLimitMaxThrew = false;
+      try { validatePagination(201); } catch { badLimitMaxThrew = true; }
+      assert(badLimitMaxThrew, "limit > 200 throws 400");
+
+      assert(validateTimeWindow().start === 0 && validateTimeWindow().end === undefined, "Default time window is start=0, end=undefined");
+      let badStartThrew = false;
+      try { validateTimeWindow(-1); } catch { badStartThrew = true; }
+      assert(badStartThrew, "Negative start throws 400");
+      let badEndThrew = false;
+      try { validateTimeWindow(10, 5); } catch { badEndThrew = true; }
+      assert(badEndThrew, "end <= start throws 400");
+
+      let badMinDurThrew = false;
+      try { validateDurationRange(-1); } catch { badMinDurThrew = true; }
+      assert(badMinDurThrew, "minDuration <= 0 throws 400");
+      let badMaxDurThrew = false;
+      try { validateDurationRange(5, 3); } catch { badMaxDurThrew = true; }
+      assert(badMaxDurThrew, "maxDuration < minDuration throws 400");
+
+      // 42.2 Unit Verification: Substring Matching & 2.0s Word Gap Invariant
+      const testWordsUnit = [
+        { word: "We", normalized: "we", start: 0.0, end: 0.4, probability: 0.99, segmentId: 0, segmentText: "We have high-quality software.", wordIndex: 0 },
+        { word: "have", normalized: "have", start: 0.5, end: 0.8, probability: 0.99, segmentId: 0, segmentText: "We have high-quality software.", wordIndex: 1 },
+        { word: "high-quality", normalized: "high-quality", start: 1.0, end: 2.0, probability: 0.98, segmentId: 0, segmentText: "We have high-quality software.", wordIndex: 2 },
+        { word: "software.", normalized: "software", start: 2.1, end: 2.8, probability: 0.97, segmentId: 0, segmentText: "We have high-quality software.", wordIndex: 3 },
+        { word: "Next", normalized: "next", start: 5.5, end: 6.0, probability: 0.95, segmentId: 1, segmentText: "Next step.", wordIndex: 4 }, // Gap: 5.5 - 2.8 = 2.7s > 2.0s
+        { word: "step.", normalized: "step", start: 6.2, end: 6.8, probability: 0.95, segmentId: 1, segmentText: "Next step.", wordIndex: 5 }
+      ];
+
+      // Substring match verification: searching "quality" matches "high-quality"
+      const subMatches = searchWordsInTranscript(testWordsUnit, ["quality"], "mockAsset", "mock.mp4", { start: 0 });
+      assert(subMatches.length === 1, "Substring search for 'quality' matches 'high-quality'");
+      assert(subMatches[0].start === 1.0 && subMatches[0].end === 2.0, "Substring match returns full word timestamps [1.0, 2.0]");
+      assert(subMatches[0].matchedText === "high-quality", "Substring match preserves verbatim word text 'high-quality'");
+
+      // Gap rule: phrase spanning across pause > 2.0s
+      const gapFailMatches = searchWordsInTranscript(testWordsUnit, ["software", "next"], "mockAsset", "mock.mp4", { start: 0 });
+      assert(gapFailMatches.length === 0, "Multi-word phrase across gap of 2.7s (> 2.0s) strictly breaks and returns no match");
+
+      // Gap rule: phrase within <= 2.0s matches
+      const gapPassMatches = searchWordsInTranscript(testWordsUnit, ["have", "high-quality"], "mockAsset", "mock.mp4", { start: 0 });
+      assert(gapPassMatches.length === 1, "Multi-word phrase with gap <= 2.0s (1.0s - 0.8s = 0.2s) matches successfully");
+      assert(gapPassMatches[0].start === 0.5 && gapPassMatches[0].end === 2.0, "Multi-word match start matches first word, end matches second word");
+      assert(gapPassMatches[0].words.length === 2, "Multi-word match words array contains both matched words");
+
+      // 42.3 Integration Setup: Test Project and Assets
+      const searchProjRes = await fetch(`${baseUrl}/api/projects`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Step 5.6 Search Intelligence Project" })
+      });
+      const searchProjId = ((await searchProjRes.json()) as { data: { id: string } }).data.id;
+
+      // Create Asset 1 in search project
+      const searchAsset1Id = new ObjectId().toHexString();
+      await mediaAssetsCol.insertOne({
+        _id: new ObjectId(searchAsset1Id),
+        projectId: searchProjId,
+        originalName: "interview_main.mp4",
+        storedFileName: "interview_main.mp4",
+        fileSize: 1048576,
+        mimeType: "video/mp4",
+        duration: 30.0,
+        width: 1920,
+        height: 1080,
+        frameRate: "30",
+        videoCodec: "h264",
+        audioCodec: "aac",
+        format: "mp4",
+        createdAt: new Date()
+      });
+
+      // 42.4 Dedicated Asset Speech Search Lifecycle States
+      // State 1: not_started (no transcription doc)
+      const speechNotStartedRes = await fetch(`${baseUrl}/api/projects/${searchProjId}/media/${searchAsset1Id}/intelligence/search/speech?q=test`);
+      assert(speechNotStartedRes.status === 400, "Speech search returns 400 when transcription not started");
+      const speechNotStartedJson = (await speechNotStartedRes.json()) as any;
+      assert(speechNotStartedJson.error.includes("not been performed"), "Error explains transcription not performed");
+
+      // State 2: queued / processing -> 409 Conflict
+      const transId1 = new ObjectId().toHexString();
+      await transcriptionsCol.insertOne({
+        _id: new ObjectId(transId1),
+        projectId: searchProjId,
+        assetId: searchAsset1Id,
+        status: "processing",
+        parameters: { modelName: "small" },
+        createdAt: new Date(),
+        updatedAt: new Date()
+      });
+      const speechProcessingRes = await fetch(`${baseUrl}/api/projects/${searchProjId}/media/${searchAsset1Id}/intelligence/search/speech?q=test`);
+      assert(speechProcessingRes.status === 409, "Speech search returns 409 Conflict when transcription is in progress");
+
+      // State 3: failed -> 422 Unprocessable Entity
+      await transcriptionsCol.updateOne({ _id: new ObjectId(transId1) }, { $set: { status: "failed", error: "OOM" } });
+      const speechFailedRes = await fetch(`${baseUrl}/api/projects/${searchProjId}/media/${searchAsset1Id}/intelligence/search/speech?q=test`);
+      assert(speechFailedRes.status === 422, "Speech search returns 422 Unprocessable Entity when transcription failed");
+
+      // State 4: canceled -> 400 Bad Request
+      await transcriptionsCol.updateOne({ _id: new ObjectId(transId1) }, { $set: { status: "canceled" } });
+      const speechCanceledRes = await fetch(`${baseUrl}/api/projects/${searchProjId}/media/${searchAsset1Id}/intelligence/search/speech?q=test`);
+      assert(speechCanceledRes.status === 400, "Speech search returns 400 Bad Request when transcription was canceled");
+
+      // State 5: completed but file missing -> 422 Unprocessable Entity
+      await transcriptionsCol.updateOne({ _id: new ObjectId(transId1) }, { $set: { status: "completed" } });
+      const speechMissingFileRes = await fetch(`${baseUrl}/api/projects/${searchProjId}/media/${searchAsset1Id}/intelligence/search/speech?q=test`);
+      assert(speechMissingFileRes.status === 422, "Speech search returns 422 when transcript artifact file is missing on disk");
+
+      // Now create valid transcript artifact on disk
+      const asset1TransDir = getAssetTranscriptionDir(searchProjId, searchAsset1Id);
+      fs.mkdirSync(asset1TransDir, { recursive: true });
+      const asset1TranscriptPath = resolveAssetTranscriptPath(searchProjId, searchAsset1Id);
+
+      const transcriptPayload1: TranscriptData = {
+        language: "en",
+        duration: 30.0,
+        text: "We deliver high-quality audio and state-of-the-art video editing. Don't wait for perfection. Start now.",
+        segments: [
+          {
+            id: 0,
+            start: 0.0,
+            end: 4.6,
+            text: "We deliver high-quality audio and state-of-the-art video editing.",
+            words: [
+              { word: "We", start: 0.0, end: 0.3, probability: 0.99 },
+              { word: "deliver", start: 0.35, end: 0.8, probability: 0.98 },
+              { word: "high-quality", start: 0.9, end: 1.6, probability: 0.97 },
+              { word: "audio", start: 1.7, end: 2.2, probability: 0.96 },
+              { word: "and", start: 2.3, end: 2.5, probability: 0.99 },
+              { word: "state-of-the-art", start: 2.6, end: 3.4, probability: 0.98 },
+              { word: "video", start: 3.5, end: 3.9, probability: 0.99 },
+              { word: "editing.", start: 4.0, end: 4.6, probability: 0.97 }
+            ]
+          },
+          {
+            id: 1,
+            start: 5.0,
+            end: 7.0,
+            text: "Don't wait for perfection.",
+            words: [
+              { word: "Don't", start: 5.0, end: 5.4, probability: 0.99 },
+              { word: "wait", start: 5.5, end: 5.9, probability: 0.98 },
+              { word: "for", start: 6.0, end: 6.2, probability: 0.99 },
+              { word: "perfection.", start: 6.3, end: 7.0, probability: 0.96 }
+            ]
+          },
+          {
+            id: 2,
+            start: 10.5,
+            end: 11.5, // 3.5s gap after segment 1
+            text: "Start now.",
+            words: [
+              { word: "Start", start: 10.5, end: 11.0, probability: 0.99 },
+              { word: "now.", start: 11.1, end: 11.5, probability: 0.98 }
+            ]
+          }
+        ]
+      };
+      fs.writeFileSync(asset1TranscriptPath, JSON.stringify(transcriptPayload1, null, 2), "utf-8");
+
+      // 42.5 Comprehensive Dialogue Query Verification
+      // A. Exact single-word match
+      const searchExactRes = await fetch(`${baseUrl}/api/projects/${searchProjId}/media/${searchAsset1Id}/intelligence/search/speech?q=video`);
+      assert(searchExactRes.status === 200, "Search for 'video' returns 200 OK");
+      const searchExactData = ((await searchExactRes.json()) as any).data;
+      assert(searchExactData.totalMatches === 1, "Exactly 1 match for 'video'");
+      assert(searchExactData.matches[0].matchedText === "video", "matchedText is 'video'");
+      assert(searchExactData.matches[0].start === 3.5 && searchExactData.matches[0].end === 3.9, "Timestamps match [3.5, 3.9]");
+      assert(searchExactData.matches[0].segmentIds[0] === 0, "segmentIds is [0]");
+      assert(searchExactData.matches[0].words[0].word === "video", "words array contains 'video'");
+
+      // B. Substring match within hyphenated word: "quality" within "high-quality"
+      const searchSubRes = await fetch(`${baseUrl}/api/projects/${searchProjId}/media/${searchAsset1Id}/intelligence/search/speech?q=quality`);
+      assert(searchSubRes.status === 200, "Search for substring 'quality' returns 200 OK");
+      const searchSubData = ((await searchSubRes.json()) as any).data;
+      assert(searchSubData.totalMatches === 1, "Substring 'quality' matches 'high-quality'");
+      assert(searchSubData.matches[0].start === 0.9 && searchSubData.matches[0].end === 1.6, "Full word timestamps [0.9, 1.6] returned for substring match");
+      assert(searchSubData.matches[0].matchedText === "high-quality", "Verbatim matchedText 'high-quality' returned");
+
+      // C. Internal hyphens query: "state-of-the-art"
+      const searchHyphenRes = await fetch(`${baseUrl}/api/projects/${searchProjId}/media/${searchAsset1Id}/intelligence/search/speech?q=state-of-the-art`);
+      assert(searchHyphenRes.status === 200, "Search for 'state-of-the-art' returns 200 OK");
+      const searchHyphenData = ((await searchHyphenRes.json()) as any).data;
+      assert(searchHyphenData.totalMatches === 1, "Matches 'state-of-the-art'");
+      assert(searchHyphenData.matches[0].start === 2.6 && searchHyphenData.matches[0].end === 3.4, "Timestamps [2.6, 3.4]");
+
+      // D. Contractions query: "don't" matches "Don't"
+      const searchDontRes = await fetch(`${baseUrl}/api/projects/${searchProjId}/media/${searchAsset1Id}/intelligence/search/speech?q=don't`);
+      assert(searchDontRes.status === 200, "Search for contraction 'don't' returns 200 OK");
+      const searchDontData = ((await searchDontRes.json()) as any).data;
+      assert(searchDontData.totalMatches === 1, "Matches contraction 'Don't'");
+      assert(searchDontData.matches[0].matchedText === "Don't", "Verbatim casing 'Don't' preserved in response");
+
+      // E. Multi-word phrase within segment: "high-quality audio"
+      const searchPhraseRes = await fetch(`${baseUrl}/api/projects/${searchProjId}/media/${searchAsset1Id}/intelligence/search/speech?q=high-quality+audio`);
+      assert(searchPhraseRes.status === 200, "Multi-word phrase search returns 200 OK");
+      const searchPhraseData = ((await searchPhraseRes.json()) as any).data;
+      assert(searchPhraseData.totalMatches === 1, "Matches phrase 'high-quality audio'");
+      assert(searchPhraseData.matches[0].start === 0.9 && searchPhraseData.matches[0].end === 2.2, "Phrase timestamps cover [0.9, 2.2]");
+      assert(searchPhraseData.matches[0].words.length === 2, "Phrase words array contains 2 words");
+
+      // F. Multi-word phrase across segment boundary with gap <= 2.0s: "editing Don't"
+      // segment 0 ends at 4.6, segment 1 starts at 5.0 (gap = 0.4s <= 2.0s)
+      const searchCrossSegRes = await fetch(`${baseUrl}/api/projects/${searchProjId}/media/${searchAsset1Id}/intelligence/search/speech?q=editing+Don't`);
+      assert(searchCrossSegRes.status === 200, "Cross-segment phrase search with gap <= 2.0s returns 200 OK");
+      const searchCrossSegData = ((await searchCrossSegRes.json()) as any).data;
+      assert(searchCrossSegData.totalMatches === 1, "Cross-segment phrase matches successfully");
+      assert(searchCrossSegData.matches[0].segmentIds.length === 2, "Cross-segment match has segmentIds [0, 1]");
+      assert(searchCrossSegData.matches[0].start === 4.0 && searchCrossSegData.matches[0].end === 5.4, "Cross-segment timestamps cover [4.0, 5.4]");
+
+      // G. Multi-word phrase across pause > 2.0s: "perfection Start"
+      // segment 1 ends at 7.0, segment 2 starts at 10.5 (gap = 3.5s > 2.0s)
+      const searchPauseRes = await fetch(`${baseUrl}/api/projects/${searchProjId}/media/${searchAsset1Id}/intelligence/search/speech?q=perfection+Start`);
+      assert(searchPauseRes.status === 200, "Query for phrase across 3.5s pause returns 200 OK");
+      const searchPauseData = ((await searchPauseRes.json()) as any).data;
+      assert(searchPauseData.totalMatches === 0, "Phrase across > 2.0s pause strictly breaks and yields 0 matches");
+
+      // H. Time window filtering [start, end)
+      // "video" is at [3.5, 3.9]
+      const windowOutRes = await fetch(`${baseUrl}/api/projects/${searchProjId}/media/${searchAsset1Id}/intelligence/search/speech?q=video&start=0&end=3.0`);
+      assert(windowOutRes.status === 200, "Time window query returns 200 OK");
+      assert(((await windowOutRes.json()) as any).data.totalMatches === 0, "Match at 3.5s excluded by window [0, 3.0)");
+
+      const windowInRes = await fetch(`${baseUrl}/api/projects/${searchProjId}/media/${searchAsset1Id}/intelligence/search/speech?q=video&start=3.0&end=4.0`);
+      assert(((await windowInRes.json()) as any).data.totalMatches === 1, "Match at 3.5s included in window [3.0, 4.0)");
+
+      // I. Pagination
+      const page1Res = await fetch(`${baseUrl}/api/projects/${searchProjId}/media/${searchAsset1Id}/intelligence/search/speech?q=and&limit=1&offset=0`);
+      const page1Data = ((await page1Res.json()) as any).data;
+      assert(page1Data.limit === 1 && page1Data.offset === 0, "Pagination params respected");
+
+      // 42.6 Dedicated Asset Silence Search
+      const searchSilenceNotStartedRes = await fetch(`${baseUrl}/api/projects/${searchProjId}/media/${searchAsset1Id}/intelligence/search/silence`);
+      assert(searchSilenceNotStartedRes.status === 400, "Silence search returns 400 when silence detection not performed");
+
+      const silAnalysisId1 = new ObjectId().toHexString();
+      await silenceDetectionsCol.insertOne({
+        _id: new ObjectId(silAnalysisId1),
+        projectId: searchProjId,
+        assetId: searchAsset1Id,
+        status: "completed",
+        parameters: { noiseThresholdDb: -35, minDurationSeconds: 0.5 },
+        intervals: [
+          { start: 0.0, end: 1.0, duration: 1.0 },
+          { start: 7.0, end: 10.5, duration: 3.5 },
+          { start: 12.0, end: 14.0, duration: 2.0 }
+        ],
+        totalSilenceDuration: 6.5,
+        audioDuration: 30.0,
+        createdAt: new Date(),
+        updatedAt: new Date()
+      });
+
+      const silenceAllRes = await fetch(`${baseUrl}/api/projects/${searchProjId}/media/${searchAsset1Id}/intelligence/search/silence`);
+      assert(silenceAllRes.status === 200, "Silence search returns 200 OK");
+      const silenceAllData = ((await silenceAllRes.json()) as any).data;
+      assert(silenceAllData.totalMatches === 3, "Finds all 3 silence intervals");
+
+      // Duration filter minDuration=2.5
+      const silenceMinDurRes = await fetch(`${baseUrl}/api/projects/${searchProjId}/media/${searchAsset1Id}/intelligence/search/silence?minDuration=2.5`);
+      const silenceMinDurData = ((await silenceMinDurRes.json()) as any).data;
+      assert(silenceMinDurData.totalMatches === 1, "minDuration=2.5 filters out shorter silences");
+      assert(silenceMinDurData.matches[0].duration === 3.5, "Matched silence duration is 3.5s");
+
+      // 42.7 Dedicated Asset Scene Search & Canonical Frame Verification
+      const searchSceneNotStartedRes = await fetch(`${baseUrl}/api/projects/${searchProjId}/media/${searchAsset1Id}/intelligence/search/scenes`);
+      assert(searchSceneNotStartedRes.status === 400, "Scene search returns 400 when scene detection not performed");
+
+      const sceneAnalysisId1 = new ObjectId().toHexString();
+      const searchScene1FramePath = resolveSceneFramePath(searchProjId, searchAsset1Id, sceneAnalysisId1, "sc_test_0");
+      const searchScene2FramePath = resolveSceneFramePath(searchProjId, searchAsset1Id, sceneAnalysisId1, "sc_test_1");
+      fs.mkdirSync(path.dirname(searchScene1FramePath), { recursive: true });
+
+      // Valid JPEG for Scene 0
+      const validFrameBuffer = Buffer.alloc(256);
+      validFrameBuffer[0] = 0xff; validFrameBuffer[1] = 0xd8;
+      validFrameBuffer[254] = 0xff; validFrameBuffer[255] = 0xd9;
+      fs.writeFileSync(searchScene1FramePath, validFrameBuffer);
+
+      // Corrupted 0-byte file for Scene 1
+      fs.writeFileSync(searchScene2FramePath, Buffer.alloc(0));
+
+      await sceneDetectionsCol.insertOne({
+        _id: new ObjectId(sceneAnalysisId1),
+        projectId: searchProjId,
+        assetId: searchAsset1Id,
+        status: "completed",
+        parameters: { threshold: 0.3, minSceneDuration: 0.5, maxScenes: 500 },
+        scenes: [
+          { id: "sc_test_0", index: 0, start: 0.0, end: 10.0, duration: 10.0, representativeTimestamp: 5.0, frameAvailable: true },
+          { id: "sc_test_1", index: 1, start: 10.0, end: 30.0, duration: 20.0, representativeTimestamp: 20.0, frameAvailable: true }
+        ],
+        sceneCount: 2,
+        videoDuration: 30.0,
+        createdAt: new Date(),
+        updatedAt: new Date()
+      });
+
+      const scenesSearchRes = await fetch(`${baseUrl}/api/projects/${searchProjId}/media/${searchAsset1Id}/intelligence/search/scenes`);
+      assert(scenesSearchRes.status === 200, "Scene search returns 200 OK");
+      const scenesSearchData = ((await scenesSearchRes.json()) as any).data;
+      assert(scenesSearchData.totalMatches === 2, "Finds 2 scenes");
+
+      // Canonical frame URL verification: must reuse Step 5.4/5.5 route
+      const sceneMatch0 = scenesSearchData.matches.find((s: any) => s.sceneIndex === 0);
+      assert(
+        sceneMatch0.frameUrl === `/api/projects/${searchProjId}/media/${searchAsset1Id}/scenes/frames/sc_test_0`,
+        "Canonical frame URL uses /scenes/frames/:sceneId structure"
+      );
+      assert(!JSON.stringify(scenesSearchData).includes("sc_test_0.jpg"), "Response never exposes internal frame filenames");
+
+      // Scene 1 with corrupt frame has frameUrl === null (never broken URL)
+      const sceneMatch1 = scenesSearchData.matches.find((s: any) => s.sceneIndex === 1);
+      assert(sceneMatch1.frameUrl === null, "frameUrl is null for structurally invalid frame");
+
+      // 42.8 Unified Asset Search: Speech Search Enriched with Scene Context
+      const unifiedSearchRes = await fetch(`${baseUrl}/api/projects/${searchProjId}/media/${searchAsset1Id}/intelligence/search?q=high-quality`);
+      assert(unifiedSearchRes.status === 200, "Unified search returns 200 OK");
+      const unifiedSearchData = ((await unifiedSearchRes.json()) as any).data;
+      assert(unifiedSearchData.sceneContextAvailable === true, "sceneContextAvailable is true when scene detection is completed");
+      assert(unifiedSearchData.totalMatches === 1, "Finds 1 match for 'high-quality'");
+      assert(unifiedSearchData.matches[0].scene !== null, "Speech match includes containing scene context");
+      assert(unifiedSearchData.matches[0].scene.sceneId === "sc_test_0", "Match at 1.0s mapped to scene 0 covering [0, 10)");
+      assert(
+        unifiedSearchData.matches[0].scene.frameUrl === `/api/projects/${searchProjId}/media/${searchAsset1Id}/scenes/frames/sc_test_0`,
+        "Enriched scene context contains canonical frame URL"
+      );
+
+      // Verify absence of types parameter / interleaving
+      assert(!("types" in unifiedSearchData), "Unified search does NOT expose a types parameter");
+      assert(unifiedSearchData.matches.every((m: any) => m.type === "speech"), "All matches are speech matches enriched with scene context");
+
+      // 42.9 Project-Wide Cross-Asset Dialogue Search
+      // Create Asset 2 in same project
+      const searchAsset2Id = new ObjectId().toHexString();
+      await mediaAssetsCol.insertOne({
+        _id: new ObjectId(searchAsset2Id),
+        projectId: searchProjId,
+        originalName: "broll_clips.mp4",
+        storedFileName: "broll_clips.mp4",
+        fileSize: 524288,
+        mimeType: "video/mp4",
+        duration: 20.0,
+        width: 1920,
+        height: 1080,
+        frameRate: "30",
+        videoCodec: "h264",
+        audioCodec: "aac",
+        format: "mp4",
+        createdAt: new Date()
+      });
+
+      const asset2TransDir = getAssetTranscriptionDir(searchProjId, searchAsset2Id);
+      fs.mkdirSync(asset2TransDir, { recursive: true });
+      const asset2TranscriptPath = resolveAssetTranscriptPath(searchProjId, searchAsset2Id);
+
+      const transcriptPayload2: TranscriptData = {
+        language: "en",
+        duration: 20.0,
+        text: "We produce state-of-the-art cinematic sequences.",
+        segments: [
+          {
+            id: 0,
+            start: 1.0,
+            end: 4.5,
+            text: "We produce state-of-the-art cinematic sequences.",
+            words: [
+              { word: "We", start: 1.0, end: 1.3, probability: 0.99 },
+              { word: "produce", start: 1.4, end: 1.9, probability: 0.98 },
+              { word: "state-of-the-art", start: 2.0, end: 3.0, probability: 0.98 },
+              { word: "cinematic", start: 3.1, end: 3.8, probability: 0.97 },
+              { word: "sequences.", start: 3.9, end: 4.5, probability: 0.96 }
+            ]
+          }
+        ]
+      };
+      fs.writeFileSync(asset2TranscriptPath, JSON.stringify(transcriptPayload2, null, 2), "utf-8");
+
+      await transcriptionsCol.insertOne({
+        _id: new ObjectId(),
+        projectId: searchProjId,
+        assetId: searchAsset2Id,
+        status: "completed",
+        parameters: { modelName: "small" },
+        createdAt: new Date(),
+        updatedAt: new Date()
+      });
+
+      // Create Asset 3 with failed transcription to verify unsearchable asset tracking
+      const searchAsset3Id = new ObjectId().toHexString();
+      await mediaAssetsCol.insertOne({
+        _id: new ObjectId(searchAsset3Id),
+        projectId: searchProjId,
+        originalName: "unprocessed_asset.mp4",
+        storedFileName: "unprocessed_asset.mp4",
+        fileSize: 1024,
+        mimeType: "video/mp4",
+        duration: 10.0,
+        width: 1920,
+        height: 1080,
+        frameRate: "30",
+        videoCodec: "h264",
+        audioCodec: "aac",
+        format: "mp4",
+        createdAt: new Date()
+      });
+      await transcriptionsCol.insertOne({
+        _id: new ObjectId(),
+        projectId: searchProjId,
+        assetId: searchAsset3Id,
+        status: "failed",
+        error: "Corrupt audio",
+        parameters: { modelName: "small" },
+        createdAt: new Date(),
+        updatedAt: new Date()
+      });
+
+      // Search project-wide for "state-of-the-art": should find matches in Asset 1 and Asset 2!
+      const projectSearchRes = await fetch(`${baseUrl}/api/projects/${searchProjId}/intelligence/search?q=state-of-the-art`);
+      assert(projectSearchRes.status === 200, "Project-wide search returns 200 OK");
+      const projectSearchData = ((await projectSearchRes.json()) as any).data;
+
+      assert(projectSearchData.searchedAssetCount === 2, "searchedAssetCount is 2 (Asset 1 and Asset 2)");
+      assert(projectSearchData.unsearchableAssetCount === 1, "unsearchableAssetCount is 1 (Asset 3)");
+      assert(projectSearchData.searchComplete === false, "searchComplete is false because Asset 3 was unsearchable");
+      assert(projectSearchData.unsearchableAssets.length === 1, "unsearchableAssets contains Asset 3 details");
+      assert(projectSearchData.unsearchableAssets[0].assetId === searchAsset3Id, "unsearchable asset ID matches Asset 3");
+      assert(projectSearchData.totalMatches === 2, "totalMatches is 2 (one from Asset 1, one from Asset 2)");
+      assert(projectSearchData.matches.length === 2, "matches array contains 2 results");
+
+      // Verify deterministic sorting: start ASC, then assetId ASC
+      // Asset 2 match starts at 2.0s; Asset 1 match starts at 2.6s
+      assert(projectSearchData.matches[0].start <= projectSearchData.matches[1].start, "Matches sorted by start time ascending");
+      assert(projectSearchData.matches[0].assetId === searchAsset2Id, "Earlier match at 2.0s is first");
+      assert(projectSearchData.matches[1].assetId === searchAsset1Id, "Later match at 2.6s is second");
+
+      // 42.10 Project-Wide Asset Eligibility & assetIds Validation
+      // Deduplication of assetIds
+      const dedupRes = await fetch(`${baseUrl}/api/projects/${searchProjId}/intelligence/search?q=state-of-the-art&assetIds=${searchAsset1Id},${searchAsset1Id}`);
+      assert(dedupRes.status === 200, "Duplicate assetIds handled cleanly");
+      const dedupData = ((await dedupRes.json()) as any).data;
+      assert(dedupData.searchedAssetCount === 1, "Deduplication ensures Asset 1 is searched only once");
+
+      // Foreign asset ID rejection: must return 400 Bad Request
+      const foreignAssetId = new ObjectId().toHexString();
+      const foreignIdRes = await fetch(`${baseUrl}/api/projects/${searchProjId}/intelligence/search?q=test&assetIds=${foreignAssetId}`);
+      assert(foreignIdRes.status === 400, "Foreign asset ID in assetIds returns 400 Bad Request");
+      const foreignIdJson = (await foreignIdRes.json()) as any;
+      assert(foreignIdJson.error.includes("Asset not found in this project"), "Error message specifies asset not found in project");
+
+      // Project where zero assets have completed transcription -> 400 Bad Request
+      const emptyProjRes = await fetch(`${baseUrl}/api/projects`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Empty Search Project" })
+      });
+      const emptyProjId = ((await emptyProjRes.json()) as { data: { id: string } }).data.id;
+      const emptyProjSearchRes = await fetch(`${baseUrl}/api/projects/${emptyProjId}/intelligence/search?q=hello`);
+      assert(emptyProjSearchRes.status === 400, "Project with 0 eligible assets returns 400 Bad Request");
+      const emptyProjSearchJson = (await emptyProjSearchRes.json()) as any;
+      assert(emptyProjSearchJson.error.includes("No eligible media assets"), "Error explains no eligible assets");
+
+      // 42.11 Exact 5,000 Match Budget Enforcement
+      // Create asset with 5,000 words matching query -> must succeed with exactly 5,000 matches
+      const budgetAssetId = new ObjectId().toHexString();
+      await mediaAssetsCol.insertOne({
+        _id: new ObjectId(budgetAssetId),
+        projectId: searchProjId,
+        originalName: "budget_test.mp4",
+        storedFileName: "budget_test.mp4",
+        fileSize: 1048576,
+        mimeType: "video/mp4",
+        duration: 6000.0,
+        width: 1920,
+        height: 1080,
+        frameRate: "30",
+        videoCodec: "h264",
+        audioCodec: "aac",
+        format: "mp4",
+        createdAt: new Date()
+      });
+
+      const budgetTransDir = getAssetTranscriptionDir(searchProjId, budgetAssetId);
+      fs.mkdirSync(budgetTransDir, { recursive: true });
+      const budgetTranscriptPath = resolveAssetTranscriptPath(searchProjId, budgetAssetId);
+
+      const fiveThousandWords: TranscriptWord[] = [];
+      for (let i = 0; i < 5000; i++) {
+        fiveThousandWords.push({
+          word: "echo",
+          start: i * 1.0,
+          end: i * 1.0 + 0.5,
+          probability: 0.99
+        });
+      }
+      fs.writeFileSync(
+        budgetTranscriptPath,
+        JSON.stringify({
+          language: "en",
+          duration: 6000.0,
+          text: "echo ".repeat(5000).trim(),
+          segments: [{ id: 0, start: 0, end: 5000.0, text: "echo", words: fiveThousandWords }]
+        }),
+        "utf-8"
+      );
+
+      const budgetTransId = new ObjectId().toHexString();
+      await transcriptionsCol.insertOne({
+        _id: new ObjectId(budgetTransId),
+        projectId: searchProjId,
+        assetId: budgetAssetId,
+        status: "completed",
+        parameters: { modelName: "small" },
+        createdAt: new Date(),
+        updatedAt: new Date()
+      });
+
+      // Exactly 5,000 matches must succeed
+      const exactBudgetRes = await fetch(`${baseUrl}/api/projects/${searchProjId}/media/${budgetAssetId}/intelligence/search/speech?q=echo&limit=10`);
+      assert(exactBudgetRes.status === 200, "Exactly 5,000 matches permitted with 200 OK");
+      const exactBudgetData = ((await exactBudgetRes.json()) as any).data;
+      assert(exactBudgetData.totalMatches === 5000, "totalMatches reports exactly 5000");
+
+      // 5,001st match must trigger HTTP 400 Bad Request
+      fiveThousandWords.push({ word: "echo", start: 5000.0, end: 5000.5, probability: 0.99 });
+      fs.writeFileSync(
+        budgetTranscriptPath,
+        JSON.stringify({
+          language: "en",
+          duration: 6000.0,
+          text: "echo ".repeat(5001).trim(),
+          segments: [{ id: 0, start: 0, end: 5001.0, text: "echo", words: fiveThousandWords }]
+        }),
+        "utf-8"
+      );
+
+      const exceededBudgetRes = await fetch(`${baseUrl}/api/projects/${searchProjId}/media/${budgetAssetId}/intelligence/search/speech?q=echo`);
+      assert(exceededBudgetRes.status === 400, "5,001st match triggers HTTP 400 Bad Request");
+      const exceededBudgetJson = (await exceededBudgetRes.json()) as any;
+      assert(exceededBudgetJson.error.includes("exceeded limit of 5000 matches"), "Error explains 5000 match limit");
+
+      // 42.12 Read-Only Guarantee Verification
+      // Verify no MongoDB records were modified during search operations
+      const transDocAfter = await transcriptionsCol.findOne({ _id: new ObjectId(transId1) });
+      assert(transDocAfter?.status === "completed", "Transcription document was NOT mutated");
+      const mediaDocAfter = await mediaAssetsCol.findOne({ _id: new ObjectId(searchAsset1Id) });
+      assert(mediaDocAfter?.audioCodec === "aac", "Media asset document was NOT mutated");
+
+      // Clean up Step 5.6 test fixtures
+      await projectsCol.deleteMany({ _id: { $in: [new ObjectId(searchProjId), new ObjectId(emptyProjId)] } });
+      await mediaAssetsCol.deleteMany({ projectId: { $in: [searchProjId, emptyProjId] } });
+      await transcriptionsCol.deleteMany({ projectId: { $in: [searchProjId, emptyProjId] } });
+      await silenceDetectionsCol.deleteMany({ projectId: { $in: [searchProjId, emptyProjId] } });
+      await sceneDetectionsCol.deleteMany({ projectId: { $in: [searchProjId, emptyProjId] } });
+      try {
+        fs.rmSync(getProjectMediaDir(searchProjId), { recursive: true, force: true });
+        const a1Dir = getAssetAnalysisDir(searchProjId, searchAsset1Id);
+        if (fs.existsSync(a1Dir)) fs.rmSync(a1Dir, { recursive: true, force: true });
+        const a2Dir = getAssetAnalysisDir(searchProjId, searchAsset2Id);
+        if (fs.existsSync(a2Dir)) fs.rmSync(a2Dir, { recursive: true, force: true });
+        const bDir = getAssetAnalysisDir(searchProjId, budgetAssetId);
+        if (fs.existsSync(bDir)) fs.rmSync(bDir, { recursive: true, force: true });
+      } catch {}
+
+      // ----------------------------------------------------
       // 24. Project Deletion: Removes Timeline Metadata & Preserves Files
       // ----------------------------------------------------
+
       console.log("\n[Test 24] Project Deletion: Removes Timeline Metadata & Preserves Local Files");
 
       const assetDoc = await mediaAssetsCol.findOne({ projectId });
