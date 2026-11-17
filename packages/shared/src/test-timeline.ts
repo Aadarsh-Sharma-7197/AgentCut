@@ -33,6 +33,7 @@ import {
   type MediaAsset
 } from "./index.js";
 import { runRenderTests } from "./test-render.js";
+import { runAgentTests } from "./test-agent.js";
 
 function runTimelineTests() {
   console.log("=== AgentCut Timeline Data Model Test Suite ===");
@@ -1389,6 +1390,11 @@ function runTimelineTests() {
   const renderRes = runRenderTests();
   passed += renderRes.passed;
   failed += renderRes.failed;
+
+  // [Test 21] Agent Runtime Contracts and State Transitions (Step 6.1)
+  const agentRes = runAgentTests();
+  passed += agentRes.passed;
+  failed += agentRes.failed;
 
   console.log(`\n=== Timeline Test Results: ${passed} passed, ${failed} failed ===`);
   if (failed > 0) {

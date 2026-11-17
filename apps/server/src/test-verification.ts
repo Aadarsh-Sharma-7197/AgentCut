@@ -115,6 +115,43 @@ import {
   MAX_WORD_GAP_SECONDS,
   MAX_AGGREGATE_ARTIFACT_READ_BYTES
 } from "./services/media-index.service.js";
+import {
+  type AgentRequest,
+  type AgentRequestStatus,
+  type AgentEvent,
+  type CreateAgentRequestDTO,
+  AGENT_SAFETY_LIMITS,
+  isValidAgentStatusTransition
+} from "@agentcut/shared";
+import {
+  createAgentRequest,
+  getAgentRequestById,
+  listAgentRequestsByProject,
+  cancelAgentRequest,
+  transitionAgentRequestStatus,
+  executeAgentRequest,
+  sanitizeRequestLimits,
+  getToolRegistry,
+  isAgentRequestActive
+} from "./services/agent/agent-request.service.js";
+import {
+  AgentValidationError,
+  AgentNotFoundError,
+  AgentStateTransitionError,
+  AgentCancellationError,
+  AgentTimeoutError,
+  AgentLimitExceededError,
+  AgentSecurityError
+} from "./services/agent/agent-errors.js";
+import { AgentToolRegistry, type AgentTool } from "./services/agent/agent-tools.js";
+import {
+  DefaultAgentExecutionContext,
+  type AgentPlanProvider,
+  type AgentStepDecision,
+  type AgentExecutionContext
+} from "./services/agent/agent-context.js";
+import { AgentRuntimeOrchestrator } from "./services/agent/agent-orchestrator.js";
+import { getAgentRequestsCollection } from "./models/agent-request.model.js";
 import type { TranscriptData, TranscriptWord } from "@agentcut/shared";
 import { ObjectId } from "mongodb";
 import type { Server } from "http";
@@ -4163,6 +4200,567 @@ frame=    3 fps=0.0 q=-0.0 Lsize=N/A time=00:00:03.04 bitrate=N/A
       await fetch(`${baseUrl}/api/projects/${project2Id}`, { method: "DELETE" });
       const postCleanProj2Jobs = await renderJobsCol.find({ projectId: project2Id }).toArray();
       assert(postCleanProj2Jobs.length === 0, "Deleting project 2 removes its associated render jobs as well");
+
+      // ==========================================
+      // TEST 43: Agent Runtime Foundation (Step 6.1)
+      // ==========================================
+      console.log("\n--- Test 43: Agent Runtime Foundation (Step 6.1) ---");
+      const agentRequestsCol = getAgentRequestsCollection();
+
+      // Create test projects
+      const agentProjARes = await fetch(`${baseUrl}/api/projects`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Agent Test Project A" })
+      });
+      const agentProjAData = (await agentProjARes.json()) as any;
+      const agentProjAId = agentProjAData.data.id;
+
+      const agentProjBRes = await fetch(`${baseUrl}/api/projects`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Agent Test Project B" })
+      });
+      const agentProjBData = (await agentProjBRes.json()) as any;
+      const agentProjBId = agentProjBData.data.id;
+
+      // 43.1: Request creation and input validation
+      // 1. Empty prompt rejected
+      const emptyPromptRes = await fetch(`${baseUrl}/api/projects/${agentProjAId}/agent/requests`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: "" })
+      });
+      assert(emptyPromptRes.status === 400, "Empty prompt is rejected with HTTP 400");
+      const emptyPromptJson = (await emptyPromptRes.json()) as any;
+      assert(emptyPromptJson.error.includes("empty"), "Empty prompt returns descriptive error");
+
+      // 2. Whitespace-only prompt rejected
+      const wsPromptRes = await fetch(`${baseUrl}/api/projects/${agentProjAId}/agent/requests`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: "   \n\t  " })
+      });
+      assert(wsPromptRes.status === 400, "Whitespace-only prompt is rejected with HTTP 400");
+
+      // 3. Invalid project ID format
+      const invalidProjRes = await fetch(`${baseUrl}/api/projects/not-a-valid-id/agent/requests`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: "Valid prompt" })
+      });
+      assert(invalidProjRes.status === 400, "Invalid project ID format rejected with HTTP 400");
+
+      // 4. Non-existent project
+      const fakeProjId = new ObjectId().toHexString();
+      const fakeProjRes = await fetch(`${baseUrl}/api/projects/${fakeProjId}/agent/requests`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: "Valid prompt" })
+      });
+      assert(fakeProjRes.status === 404, "Non-existent project ID rejected with HTTP 404");
+
+      // 5. Exceeding max prompt length
+      const longPrompt = "a".repeat(AGENT_SAFETY_LIMITS.MAX_PROMPT_LENGTH + 1);
+      const longPromptRes = await fetch(`${baseUrl}/api/projects/${agentProjAId}/agent/requests`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: longPrompt })
+      });
+      assert(longPromptRes.status === 400, "Prompt exceeding max length rejected with HTTP 400");
+
+      // 6. Limits validation
+      const invalidLimitsRes1 = await fetch(`${baseUrl}/api/projects/${agentProjAId}/agent/requests`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: "Test", maxIterations: 0 })
+      });
+      assert(invalidLimitsRes1.status === 400, "maxIterations < 1 rejected with HTTP 400");
+
+      const invalidLimitsRes2 = await fetch(`${baseUrl}/api/projects/${agentProjAId}/agent/requests`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: "Test", maxIterations: 100 })
+      });
+      assert(invalidLimitsRes2.status === 400, "maxIterations > 50 rejected with HTTP 400");
+
+      const invalidLimitsRes3 = await fetch(`${baseUrl}/api/projects/${agentProjAId}/agent/requests`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: "Test", maxToolCalls: 0 })
+      });
+      assert(invalidLimitsRes3.status === 400, "maxToolCalls < 1 rejected with HTTP 400");
+
+      const invalidLimitsRes4 = await fetch(`${baseUrl}/api/projects/${agentProjAId}/agent/requests`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: "Test", timeoutMs: 500 })
+      });
+      assert(invalidLimitsRes4.status === 400, "timeoutMs < 1000 rejected with HTTP 400");
+
+      // 7. Successful creation with defaults
+      const createDefaultRes = await fetch(`${baseUrl}/api/projects/${agentProjAId}/agent/requests`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: "Cut out silences and trim the beginning" })
+      });
+      assert(createDefaultRes.status === 201, "Valid agent request created with HTTP 201");
+      const createDefaultJson = (await createDefaultRes.json()) as any;
+      const req1 = createDefaultJson.data as AgentRequest;
+      assert(typeof req1.id === "string" && req1.id.length > 0, "Created request has valid UUID id");
+      assert(req1.projectId === agentProjAId, "Created request has correct projectId");
+      assert(req1.prompt === "Cut out silences and trim the beginning", "Created request preserves prompt text");
+      assert(req1.status === "queued", "Initial status is 'queued'");
+      assert(req1.iterations === 0, "Initial iterations is 0");
+      assert(req1.toolCallsCount === 0, "Initial toolCallsCount is 0");
+      assert(req1.limits.maxIterations === 10, "Default maxIterations is 10");
+      assert(req1.limits.maxToolCalls === 25, "Default maxToolCalls is 25");
+      assert(req1.limits.timeoutMs === 60000, "Default timeoutMs is 60000");
+      assert(Array.isArray(req1.events) && req1.events.length === 1, "Initial event log contains request_queued event");
+      assert(req1.events[0].type === "request_queued", "Initial event type is 'request_queued'");
+      assert(Boolean(req1.createdAt) && Boolean(req1.updatedAt), "Created request contains createdAt and updatedAt timestamps");
+
+      // 8. Successful creation with custom limits
+      const createCustomRes = await fetch(`${baseUrl}/api/projects/${agentProjAId}/agent/requests`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: "Custom limits request",
+          maxIterations: 5,
+          maxToolCalls: 12,
+          timeoutMs: 15000
+        })
+      });
+      assert(createCustomRes.status === 201, "Agent request with custom limits created with HTTP 201");
+      const reqCustom = ((await createCustomRes.json()) as any).data as AgentRequest;
+      assert(reqCustom.limits.maxIterations === 5, "Custom maxIterations 5 stored accurately");
+      assert(reqCustom.limits.maxToolCalls === 12, "Custom maxToolCalls 12 stored accurately");
+      assert(reqCustom.limits.timeoutMs === 15000, "Custom timeoutMs 15000 stored accurately");
+
+      // 43.2: Every Valid Lifecycle Transition
+      // Path 1: queued -> processing -> awaiting_approval -> processing -> completed
+      const reqLife1 = await createAgentRequest(agentProjAId, { prompt: "Lifecycle test 1" });
+      assert(reqLife1.status === "queued", "Request starts queued");
+
+      const t1_proc = await transitionAgentRequestStatus(reqLife1.id, "processing");
+      assert(t1_proc.status === "processing", "Transitioned queued -> processing");
+      assert(Boolean(t1_proc.startedAt), "startedAt is set upon transition to processing");
+
+      const t1_approval = await transitionAgentRequestStatus(reqLife1.id, "awaiting_approval", {
+        approvalPlan: {
+          description: "Split clip at 00:05",
+          proposedActions: [{ toolName: "split_clip", params: { time: 5 } }]
+        }
+      });
+      assert(t1_approval.status === "awaiting_approval", "Transitioned processing -> awaiting_approval");
+      assert(t1_approval.approvalPlan?.description === "Split clip at 00:05", "approvalPlan saved");
+
+      const t1_proc2 = await transitionAgentRequestStatus(reqLife1.id, "processing");
+      assert(t1_proc2.status === "processing", "Transitioned awaiting_approval -> processing");
+
+      const t1_comp = await transitionAgentRequestStatus(reqLife1.id, "completed", {
+        result: { summary: "All edits applied successfully." }
+      });
+      assert(t1_comp.status === "completed", "Transitioned processing -> completed");
+      assert(Boolean(t1_comp.completedAt), "completedAt is set upon completion");
+      assert(t1_comp.result?.summary === "All edits applied successfully.", "result saved");
+
+      // Path 2: queued -> processing -> failed
+      const reqLife2 = await createAgentRequest(agentProjAId, { prompt: "Lifecycle test 2" });
+      await transitionAgentRequestStatus(reqLife2.id, "processing");
+      const t2_failed = await transitionAgentRequestStatus(reqLife2.id, "failed", {
+        error: "Execution encountered an error."
+      });
+      assert(t2_failed.status === "failed", "Transitioned processing -> failed");
+      assert(Boolean(t2_failed.completedAt), "completedAt set upon failure");
+      assert(t2_failed.error === "Execution encountered an error.", "Error message stored");
+
+      // Path 3: queued -> canceled
+      const reqLife3 = await createAgentRequest(agentProjAId, { prompt: "Lifecycle test 3" });
+      const t3_canc = await transitionAgentRequestStatus(reqLife3.id, "canceled");
+      assert(t3_canc.status === "canceled", "Transitioned queued -> canceled");
+      assert(Boolean(t3_canc.completedAt), "completedAt set upon cancel");
+
+      // Path 4: queued -> processing -> canceled
+      const reqLife4 = await createAgentRequest(agentProjAId, { prompt: "Lifecycle test 4" });
+      await transitionAgentRequestStatus(reqLife4.id, "processing");
+      const t4_canc = await transitionAgentRequestStatus(reqLife4.id, "canceled");
+      assert(t4_canc.status === "canceled", "Transitioned processing -> canceled");
+
+      // Path 5: queued -> processing -> awaiting_approval -> canceled
+      const reqLife5 = await createAgentRequest(agentProjAId, { prompt: "Lifecycle test 5" });
+      await transitionAgentRequestStatus(reqLife5.id, "processing");
+      await transitionAgentRequestStatus(reqLife5.id, "awaiting_approval");
+      const t5_canc = await transitionAgentRequestStatus(reqLife5.id, "canceled");
+      assert(t5_canc.status === "canceled", "Transitioned awaiting_approval -> canceled");
+
+      // Path 6: queued -> processing -> awaiting_approval -> completed
+      const reqLife6 = await createAgentRequest(agentProjAId, { prompt: "Lifecycle test 6" });
+      await transitionAgentRequestStatus(reqLife6.id, "processing");
+      await transitionAgentRequestStatus(reqLife6.id, "awaiting_approval");
+      const t6_comp = await transitionAgentRequestStatus(reqLife6.id, "completed");
+      assert(t6_comp.status === "completed", "Transitioned awaiting_approval -> completed");
+
+      // Path 7: queued -> processing -> awaiting_approval -> failed
+      const reqLife7 = await createAgentRequest(agentProjAId, { prompt: "Lifecycle test 7" });
+      await transitionAgentRequestStatus(reqLife7.id, "processing");
+      await transitionAgentRequestStatus(reqLife7.id, "awaiting_approval");
+      const t7_failed = await transitionAgentRequestStatus(reqLife7.id, "failed", { error: "Rejected by user" });
+      assert(t7_failed.status === "failed", "Transitioned awaiting_approval -> failed");
+
+      // 43.3: Invalid Lifecycle Transitions (Strict Rejection)
+      // 1. queued -> completed directly (not allowed)
+      const reqInv1 = await createAgentRequest(agentProjAId, { prompt: "Invalid transition 1" });
+      let inv1Caught = false;
+      try {
+        await transitionAgentRequestStatus(reqInv1.id, "completed");
+      } catch (err) {
+        inv1Caught = err instanceof AgentStateTransitionError;
+      }
+      assert(inv1Caught, "Direct queued -> completed transition rejected with AgentStateTransitionError");
+
+      // 2. queued -> awaiting_approval directly (not allowed)
+      let inv2Caught = false;
+      try {
+        await transitionAgentRequestStatus(reqInv1.id, "awaiting_approval");
+      } catch (err) {
+        inv2Caught = err instanceof AgentStateTransitionError;
+      }
+      assert(inv2Caught, "Direct queued -> awaiting_approval transition rejected with AgentStateTransitionError");
+
+      // 3. Terminal state completed cannot transition
+      let compToProcCaught = false;
+      try {
+        await transitionAgentRequestStatus(reqLife1.id, "processing");
+      } catch (err) {
+        compToProcCaught = err instanceof AgentStateTransitionError;
+      }
+      assert(compToProcCaught, "Completed request cannot transition to processing");
+
+      let compToFailCaught = false;
+      try {
+        await transitionAgentRequestStatus(reqLife1.id, "failed");
+      } catch (err) {
+        compToFailCaught = err instanceof AgentStateTransitionError;
+      }
+      assert(compToFailCaught, "Completed request cannot transition to failed");
+
+      let compToCancCaught = false;
+      try {
+        await transitionAgentRequestStatus(reqLife1.id, "canceled");
+      } catch (err) {
+        compToCancCaught = err instanceof AgentStateTransitionError;
+      }
+      assert(compToCancCaught, "Completed request cannot transition to canceled");
+
+      // 4. Terminal state failed cannot transition
+      let failToCompCaught = false;
+      try {
+        await transitionAgentRequestStatus(reqLife2.id, "completed");
+      } catch (err) {
+        failToCompCaught = err instanceof AgentStateTransitionError;
+      }
+      assert(failToCompCaught, "Failed request cannot transition to completed");
+
+      let failToProcCaught = false;
+      try {
+        await transitionAgentRequestStatus(reqLife2.id, "processing");
+      } catch (err) {
+        failToProcCaught = err instanceof AgentStateTransitionError;
+      }
+      assert(failToProcCaught, "Failed request cannot transition to processing");
+
+      // 5. Terminal state canceled cannot transition
+      let cancToCompCaught = false;
+      try {
+        await transitionAgentRequestStatus(reqLife3.id, "completed");
+      } catch (err) {
+        cancToCompCaught = err instanceof AgentStateTransitionError;
+      }
+      assert(cancToCompCaught, "Canceled request cannot transition to completed");
+
+      let cancToProcCaught = false;
+      try {
+        await transitionAgentRequestStatus(reqLife3.id, "processing");
+      } catch (err) {
+        cancToProcCaught = err instanceof AgentStateTransitionError;
+      }
+      assert(cancToProcCaught, "Canceled request cannot transition to processing");
+
+      // 43.4: Cancellation (API & Active Execution)
+      // Cancel queued via API
+      const reqToCancel = await createAgentRequest(agentProjAId, { prompt: "Cancel test" });
+      const cancelApiRes = await fetch(`${baseUrl}/api/projects/${agentProjAId}/agent/requests/${reqToCancel.id}/cancel`, {
+        method: "POST"
+      });
+      assert(cancelApiRes.status === 200, "Canceling queued request via API returns HTTP 200");
+      const cancelApiJson = (await cancelApiRes.json()) as any;
+      assert(cancelApiJson.data.status === "canceled", "Status is updated to 'canceled'");
+      assert(
+        cancelApiJson.data.events.some((e: any) => e.type === "request_canceled"),
+        "Event log contains 'request_canceled' event"
+      );
+
+      // Idempotent cancellation
+      const cancelAgainRes = await fetch(`${baseUrl}/api/projects/${agentProjAId}/agent/requests/${reqToCancel.id}/cancel`, {
+        method: "POST"
+      });
+      assert(cancelAgainRes.status === 200, "Canceling already canceled request is idempotent (HTTP 200)");
+
+      // Reject cancellation of completed request
+      const cancelCompRes = await fetch(`${baseUrl}/api/projects/${agentProjAId}/agent/requests/${reqLife1.id}/cancel`, {
+        method: "POST"
+      });
+      assert(cancelCompRes.status === 400, "Canceling completed request rejected with HTTP 400");
+      const cancelCompJson = (await cancelCompRes.json()) as any;
+      assert(cancelCompJson.error.includes("Cannot cancel"), "Rejection error explains request cannot be canceled");
+
+      // Reject cancellation of failed request
+      const cancelFailRes = await fetch(`${baseUrl}/api/projects/${agentProjAId}/agent/requests/${reqLife2.id}/cancel`, {
+        method: "POST"
+      });
+      assert(cancelFailRes.status === 400, "Canceling failed request rejected with HTTP 400");
+
+      // Live cancellation of active execution
+      const liveCancelReq = await createAgentRequest(agentProjAId, { prompt: "Live cancellation test" });
+      let activeStartedResolve!: () => void;
+      const activeStartedPromise = new Promise<void>((res) => { activeStartedResolve = res; });
+
+      // Run execution in background with a provider that halts until signaled
+      const liveExecutionPromise = executeAgentRequest(agentProjAId, liveCancelReq.id, {
+        async generateStep(ctx) {
+          activeStartedResolve();
+          // Simulate ongoing async processing waiting on cancellation
+          while (!ctx.signal.aborted) {
+            await new Promise((r) => setTimeout(r, 20));
+          }
+          ctx.checkCancellation();
+          return { type: "finish", result: { summary: "Should not reach" } };
+        }
+      });
+
+      // Wait for execution to start and register active controller
+      await activeStartedPromise;
+      assert(isAgentRequestActive(liveCancelReq.id), "Request is actively registered in runtime controller registry");
+
+      // Now cancel via cancelAgentRequest
+      const cancelledLiveReq = await cancelAgentRequest(agentProjAId, liveCancelReq.id);
+      assert(cancelledLiveReq.status === "canceled", "Active request cancelled immediately");
+      await liveExecutionPromise;
+      assert(!isAgentRequestActive(liveCancelReq.id), "Request unregistered from active controllers after settling");
+
+      // 43.5: Execution Timeout Handling
+      const timeoutReq = await createAgentRequest(agentProjAId, {
+        prompt: "Timeout test",
+        timeoutMs: 1000 // minimum 1000ms
+      });
+
+      const slowProvider: AgentPlanProvider = {
+        async generateStep(_ctx) {
+          // Wait longer than timeout
+          await new Promise((r) => setTimeout(r, 1100));
+          return { type: "finish", result: { summary: "Too slow" } };
+        }
+      };
+
+      const timedOutResult = await executeAgentRequest(agentProjAId, timeoutReq.id, slowProvider);
+      assert(timedOutResult.status === "failed", "Timed out execution transitions to 'failed'");
+      assert(timedOutResult.error?.includes("timed out"), "Error message notes execution timed out");
+      assert(
+        timedOutResult.events.some((e) => e.type === "request_failed" && e.message.includes("timed out")),
+        "Events log records timeout failure"
+      );
+
+      // 43.6: Maximum Iteration Limits
+      const iterReq = await createAgentRequest(agentProjAId, {
+        prompt: "Iteration limit test",
+        maxIterations: 2
+      });
+
+      let iterationCount = 0;
+      const infiniteIterProvider: AgentPlanProvider = {
+        async generateStep(_ctx) {
+          iterationCount++;
+          // Never finishes, keeps proposing next steps
+          return {
+            type: "tool_call",
+            toolName: "test_tool",
+            params: {}
+          };
+        }
+      };
+
+      const iterRegistry = new AgentToolRegistry();
+      iterRegistry.registerTool({
+        name: "test_tool",
+        description: "A test tool",
+        validate: (p) => p,
+        execute: async () => ({ ok: true })
+      });
+
+      const iterLimitResult = await executeAgentRequest(agentProjAId, iterReq.id, infiniteIterProvider, iterRegistry);
+      assert(iterLimitResult.status === "failed", "Exceeding max iterations transitions to 'failed'");
+      assert(iterLimitResult.error?.includes("maximum iterations limit of 2"), "Error explains iteration limit exceeded");
+      assert(iterLimitResult.iterations === 2, "Iterations capped at 2");
+
+      // 43.7: Maximum Tool-Call Limits
+      const toolLimitReq = await createAgentRequest(agentProjAId, {
+        prompt: "Tool call limit test",
+        maxIterations: 10,
+        maxToolCalls: 2
+      });
+
+      const toolLimitProvider: AgentPlanProvider = {
+        async generateStep(_ctx) {
+          return {
+            type: "tool_call",
+            toolName: "test_tool",
+            params: {}
+          };
+        }
+      };
+
+      const toolLimitResult = await executeAgentRequest(agentProjAId, toolLimitReq.id, toolLimitProvider, iterRegistry);
+      assert(toolLimitResult.status === "failed", "Exceeding max tool calls transitions to 'failed'");
+      assert(toolLimitResult.error?.includes("maximum tool_calls limit of 2"), "Error explains tool-calls limit exceeded");
+      assert(toolLimitResult.toolCallsCount === 2, "Tool calls count capped at 2");
+
+      // 43.8: Concurrent Requests Handling
+      const concurrentReqPromises = Array.from({ length: 5 }, async (_, i) => {
+        const cReq = await createAgentRequest(agentProjAId, { prompt: `Concurrent prompt ${i}` });
+        const provider: AgentPlanProvider = {
+          async generateStep(ctx) {
+            await new Promise((r) => setTimeout(r, 20));
+            return { type: "finish", result: { summary: `Finished ${i} at iter ${ctx.currentIteration}` } };
+          }
+        };
+        return executeAgentRequest(agentProjAId, cReq.id, provider);
+      });
+
+      const concurrentAgentResults = await Promise.all(concurrentReqPromises);
+      assert(concurrentAgentResults.length === 5, "5 concurrent requests processed");
+      assert(concurrentAgentResults.every((r) => r.status === "completed"), "All 5 concurrent requests completed successfully");
+      const uniqueIds = new Set(concurrentAgentResults.map((r) => r.id));
+      assert(uniqueIds.size === 5, "All 5 concurrent requests have unique IDs and execution logs");
+
+      // 43.9: Project Isolation and Ownership
+      const projAReq = await createAgentRequest(agentProjAId, { prompt: "Project A isolation prompt" });
+
+      // Fetching Project A request under Project B -> 404
+      const crossFetchRes = await fetch(`${baseUrl}/api/projects/${agentProjBId}/agent/requests/${projAReq.id}`);
+      assert(crossFetchRes.status === 404, "Cross-project request retrieval returns HTTP 404");
+
+      // Canceling Project A request under Project B -> 404
+      const crossCancelRes = await fetch(`${baseUrl}/api/projects/${agentProjBId}/agent/requests/${projAReq.id}/cancel`, {
+        method: "POST"
+      });
+      assert(crossCancelRes.status === 404, "Cross-project request cancellation returns HTTP 404");
+
+      // Listing Project B requests does not contain Project A request
+      const listProjBRes = await fetch(`${baseUrl}/api/projects/${agentProjBId}/agent/requests`);
+      const listProjBData = (await listProjBRes.json()) as any;
+      const foundInB = listProjBData.data.some((r: any) => r.id === projAReq.id);
+      assert(!foundInB, "Project B listing does not contain requests belonging to Project A");
+
+      // 43.10: Persistence and Retrieval API
+      // Fetch single request
+      const getReqRes = await fetch(`${baseUrl}/api/projects/${agentProjAId}/agent/requests/${reqLife1.id}`);
+      assert(getReqRes.status === 200, "Retrieving request via API returns HTTP 200");
+      const getReqJson = (await getReqRes.json()) as any;
+      assert(getReqJson.data.id === reqLife1.id, "Retrieved request matches requested ID");
+      assert(getReqJson.data.status === "completed", "Retrieved request status matches persisted state");
+      assert(getReqJson.data.result?.summary === "All edits applied successfully.", "Retrieved request result matches persisted state");
+      assert(Array.isArray(getReqJson.data.events) && getReqJson.data.events.length > 0, "Retrieved request contains events array");
+
+      // List with pagination and status filter
+      const listCompletedRes = await fetch(`${baseUrl}/api/projects/${agentProjAId}/agent/requests?status=completed&limit=3&page=1`);
+      assert(listCompletedRes.status === 200, "Listing with status=completed returns HTTP 200");
+      const listCompletedJson = (await listCompletedRes.json()) as any;
+      assert(Array.isArray(listCompletedJson.data), "List response contains data array");
+      assert(listCompletedJson.data.every((r: any) => r.status === "completed"), "All returned requests have status=completed");
+      assert(listCompletedJson.data.length <= 3, "List response respects limit=3");
+
+      // 43.11: Failure Handling & Error Sanitization
+      const failReq = await createAgentRequest(agentProjAId, { prompt: "Fail test" });
+      const unhandledErrorProvider: AgentPlanProvider = {
+        async generateStep(_ctx) {
+          throw new Error("Internal secret connection string leak: mongodb://secret@host:27017");
+        }
+      };
+      const unhandledResult = await executeAgentRequest(agentProjAId, failReq.id, unhandledErrorProvider);
+      assert(unhandledResult.status === "failed", "Unhandled exception transitions request to 'failed'");
+      assert(
+        !unhandledResult.error?.includes("mongodb://secret"),
+        "CRITICAL SECURITY: Internal secrets and unhandled error details are sanitized and never leaked to client"
+      );
+      assert(
+        unhandledResult.error === "An unexpected error occurred during agent execution.",
+        "Sanitized user-facing error message returned"
+      );
+
+      // Verify once failed, cannot become completed
+      let failToCompAttempt = false;
+      try {
+        await transitionAgentRequestStatus(failReq.id, "completed");
+      } catch (err) {
+        failToCompAttempt = err instanceof AgentStateTransitionError;
+      }
+      assert(failToCompAttempt, "CRITICAL POLICY: A failed request cannot become completed");
+
+      // 43.12: Security & Execution Controls (No Arbitrary Tool or Command Execution)
+      const secRegistry = new AgentToolRegistry();
+      // Test invalid tool name registration
+      let invalidNameCaught = false;
+      try {
+        secRegistry.registerTool({
+          name: "rm -rf /; evil",
+          description: "Dangerous command",
+          validate: (p) => p,
+          execute: async () => ({})
+        });
+      } catch (err) {
+        invalidNameCaught = err instanceof AgentSecurityError;
+      }
+      assert(invalidNameCaught, "CRITICAL SECURITY: Dangerous/non-alphanumeric tool name rejected with AgentSecurityError");
+
+      // Attempt to invoke unallowlisted tool
+      const unallowlistedReq = await createAgentRequest(agentProjAId, { prompt: "Arbitrary command execution attempt" });
+      const maliciousProvider: AgentPlanProvider = {
+        async generateStep(_ctx) {
+          return {
+            type: "tool_call",
+            toolName: "exec_shell_command",
+            params: { cmd: "whoami" }
+          };
+        }
+      };
+
+      const maliciousResult = await executeAgentRequest(agentProjAId, unallowlistedReq.id, maliciousProvider, secRegistry);
+      assert(maliciousResult.status === "failed", "Unregistered tool execution immediately fails");
+      assert(
+        maliciousResult.error?.includes("Tool 'exec_shell_command' is not allowlisted or registered."),
+        "CRITICAL SECURITY: Unregistered tool is blocked with explicit security error"
+      );
+      assert(
+        maliciousResult.events.some((e) => e.type === "request_failed" && e.message.includes("not allowlisted")),
+        "Security event logged in request events"
+      );
+
+      // 43.13: Cascading Deletion on Project Removal
+      const projADocsBefore = await agentRequestsCol.find({ projectId: agentProjAId }).toArray();
+      assert(projADocsBefore.length > 0, "Project A has persisted agent requests in MongoDB");
+
+      const delProjARes = await fetch(`${baseUrl}/api/projects/${agentProjAId}`, { method: "DELETE" });
+      assert(delProjARes.status === 200, "Project A deleted with HTTP 200");
+
+      const projADocsAfter = await agentRequestsCol.find({ projectId: agentProjAId }).toArray();
+      assert(projADocsAfter.length === 0, "Deleting project cascade-deletes all its agent requests in MongoDB");
+
+      // Clean up Project B
+      await fetch(`${baseUrl}/api/projects/${agentProjBId}`, { method: "DELETE" });
+      const projBDocsAfter = await agentRequestsCol.find({ projectId: agentProjBId }).toArray();
+      assert(projBDocsAfter.length === 0, "Deleting project B cascade-deletes its agent requests in MongoDB");
+
 
 
       // Clean up temporary disk files

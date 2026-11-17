@@ -9,6 +9,7 @@ import { searchProjectIntelligenceHandler } from "../controllers/media.controlle
 import { mediaRouter } from "./media.routes.js";
 import { timelineRouter } from "./timeline.routes.js";
 import { renderRouter } from "./render.routes.js";
+import { agentRouter } from "./agent.routes.js";
 
 export const projectRouter = Router();
 
@@ -29,4 +30,7 @@ projectRouter.use("/:projectId/timeline", timelineRouter);
 
 // Mount rendering routes under /api/projects/:projectId/render
 projectRouter.use("/:projectId/render", renderRouter);
+
+// Mount agent runtime routes under /api/projects/:projectId/agent
+projectRouter.use("/:projectId/agent", agentRouter);
 
