@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@agentcut/shared": "*",
+    "@google/genai": "^3.4.0",
     "cors": "^2.8.6",
     "dotenv": "^18.0.10",
     "express": "^4.21.2",

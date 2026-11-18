@@ -51,6 +51,13 @@ export interface AgentResult {
   output?: Record<string, unknown>;
 }
 
+export type AgentStepDecision =
+  | { type: "tool_call"; toolName: string; params: Record<string, unknown> }
+  | { type: "ask_approval"; plan: AgentApprovalPlan }
+  | { type: "finish"; result: AgentResult }
+  | { type: "fail"; error: string };
+
+
 export interface AgentRequest {
   id: string;
   projectId: string;

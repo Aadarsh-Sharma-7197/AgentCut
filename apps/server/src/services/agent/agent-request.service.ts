@@ -28,12 +28,38 @@ import {
   type AgentPlanProvider
 } from "./agent-context.js";
 import { AgentRuntimeOrchestrator } from "./agent-orchestrator.js";
+import {
+  isGeminiConfigured,
+  getGeminiConfig,
+  GeminiConfigurationError
+} from "../../config/gemini.config.js";
+import { GeminiPlanProvider } from "./gemini/gemini-provider.js";
 
 // Global tool registry for the agent runtime
 const defaultToolRegistry = new AgentToolRegistry();
 
 // In-memory active abort controllers for live cancellation
 const activeControllers = new Map<string, AbortController>();
+
+// Configurable custom plan provider (for testing or runtime override)
+let customPlanProvider: AgentPlanProvider | null = null;
+
+export function setCustomPlanProvider(provider: AgentPlanProvider | null): void {
+  customPlanProvider = provider;
+}
+
+export function getActivePlanProvider(): AgentPlanProvider {
+  if (customPlanProvider) {
+    return customPlanProvider;
+  }
+  if (!isGeminiConfigured()) {
+    throw new GeminiConfigurationError(
+      "Gemini LLM provider is not configured. GEMINI_API_KEY is missing."
+    );
+  }
+  const config = getGeminiConfig();
+  return new GeminiPlanProvider(config, defaultToolRegistry);
+}
 
 export function getToolRegistry(): AgentToolRegistry {
   return defaultToolRegistry;
@@ -378,7 +404,7 @@ export async function cancelAgentRequest(
 export async function executeAgentRequest(
   projectId: string,
   requestId: string,
-  provider: AgentPlanProvider,
+  provider?: AgentPlanProvider,
   toolRegistry: AgentToolRegistry = defaultToolRegistry
 ): Promise<AgentRequest> {
   const doc = await getAgentRequestRawById(requestId);
@@ -390,6 +416,23 @@ export async function executeAgentRequest(
     throw new AgentValidationError(
       `Cannot execute agent request with terminal status '${doc.status}'.`
     );
+  }
+
+  let resolvedProvider: AgentPlanProvider;
+  try {
+    resolvedProvider = provider ?? getActivePlanProvider();
+  } catch (providerErr) {
+    const provMsg = providerErr instanceof Error ? providerErr.message : String(providerErr);
+    const failEvent: AgentEvent = {
+      id: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      type: "request_failed",
+      message: provMsg
+    };
+    return await transitionAgentRequestStatus(requestId, "failed", {
+      error: provMsg,
+      events: [...doc.events, failEvent]
+    });
   }
 
   // Transition to processing
@@ -413,7 +456,7 @@ export async function executeAgentRequest(
   const orchestrator = new AgentRuntimeOrchestrator(toolRegistry);
 
   try {
-    const executionResult = await orchestrator.execute(context, provider);
+    const executionResult = await orchestrator.execute(context, resolvedProvider);
 
     const latestDoc = await getAgentRequestRawById(requestId);
     if (latestDoc && latestDoc.status === "canceled" && executionResult.status === "canceled") {

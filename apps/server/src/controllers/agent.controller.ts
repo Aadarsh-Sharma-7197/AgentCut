@@ -6,12 +6,14 @@ import {
   createAgentRequest,
   getAgentRequestById,
   listAgentRequestsByProject,
-  cancelAgentRequest
+  cancelAgentRequest,
+  executeAgentRequest
 } from "../services/agent/agent-request.service.js";
 import {
   AgentValidationError,
   AgentNotFoundError
 } from "../services/agent/agent-errors.js";
+import { GeminiConfigurationError } from "../config/gemini.config.js";
 
 export async function createAgentRequestHandler(req: Request, res: Response): Promise<void> {
   const { projectId } = req.params;
@@ -29,9 +31,30 @@ export async function createAgentRequestHandler(req: Request, res: Response): Pr
     }
 
     const request = await createAgentRequest(projectId, req.body);
+
+    if (req.query.execute === "sync" || req.body?.execute === true) {
+      try {
+        const executed = await executeAgentRequest(projectId, request.id);
+        res.status(201).json({ data: executed });
+        return;
+      } catch (execErr) {
+        if (execErr instanceof GeminiConfigurationError) {
+          res.status(400).json({ error: execErr.message });
+          return;
+        }
+        throw execErr;
+      }
+    } else if (req.body?.autoExecute !== false) {
+      queueMicrotask(() => {
+        executeAgentRequest(projectId, request.id).catch((err) => {
+          console.error(`[AgentRequestService] Background execution error for ${request.id}:`, err);
+        });
+      });
+    }
+
     res.status(201).json({ data: request });
   } catch (err) {
-    if (err instanceof AgentValidationError) {
+    if (err instanceof AgentValidationError || err instanceof GeminiConfigurationError) {
       res.status(400).json({ error: err.message });
       return;
     }
