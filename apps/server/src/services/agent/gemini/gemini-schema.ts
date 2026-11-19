@@ -1,10 +1,15 @@
 import type {
   AgentStepDecision,
   AgentApprovalPlan,
+  AgentEditingPlan,
+  ProposedOperationType,
   AgentResult
 } from "@agentcut/shared";
+import { SUPPORTED_PROPOSED_OPERATIONS } from "@agentcut/shared";
 import type { AgentToolRegistry } from "../agent-tools.js";
 import { AgentValidationError, AgentSecurityError } from "../agent-errors.js";
+import { validateEditingPlan } from "../plan-validator.js";
+import crypto from "crypto";
 
 export const MAX_GEMINI_RESPONSE_BYTES = 65536; // 64 KB safety limit
 
@@ -59,6 +64,60 @@ export const GEMINI_AGENT_DECISION_SCHEMA = {
         estimatedImpact: {
           type: "STRING",
           description: "Optional explanation of impact on the timeline."
+        },
+        editingPlan: {
+          type: "OBJECT",
+          description: "Structured editing plan containing proposed editing operations and evidence.",
+          properties: {
+            id: { type: "STRING" },
+            summary: { type: "STRING" },
+            operations: {
+              type: "ARRAY",
+              items: {
+                type: "OBJECT",
+                properties: {
+                  id: { type: "STRING" },
+                  type: {
+                    type: "STRING",
+                    enum: ["remove_silence", "split_clip", "trim_clip", "move_clip", "delete_clip"]
+                  },
+                  description: { type: "STRING" },
+                  explanation: { type: "STRING" },
+                  assetId: { type: "STRING" },
+                  trackId: { type: "STRING" },
+                  clipId: { type: "STRING" },
+                  timeRange: {
+                    type: "OBJECT",
+                    properties: {
+                      sourceStart: { type: "NUMBER" },
+                      sourceEnd: { type: "NUMBER" },
+                      timelineStart: { type: "NUMBER" },
+                      timelineEnd: { type: "NUMBER" }
+                    }
+                  },
+                  params: { type: "OBJECT" },
+                  evidence: {
+                    type: "ARRAY",
+                    items: {
+                      type: "OBJECT",
+                      properties: {
+                        type: { type: "STRING", enum: ["speech", "silence", "scene"] },
+                        assetId: { type: "STRING" },
+                        start: { type: "NUMBER" },
+                        end: { type: "NUMBER" },
+                        snippet: { type: "STRING" },
+                        frameUrl: { type: "STRING" }
+                      },
+                      required: ["type", "assetId"]
+                    }
+                  }
+                },
+                required: ["type", "description"]
+              }
+            },
+            warnings: { type: "ARRAY", items: { type: "STRING" } },
+            assumptions: { type: "ARRAY", items: { type: "STRING" } }
+          }
         }
       }
     },
@@ -211,7 +270,10 @@ export function validateGeminiDecision(
             throw new AgentValidationError(`proposedActions[${i}].toolName must be a non-empty string.`);
           }
           const actionToolName = actObj.toolName.trim();
-          if (toolRegistry && !toolRegistry.hasTool(actionToolName)) {
+          const isRegistered = toolRegistry ? toolRegistry.hasTool(actionToolName) : true;
+          const isSupportedEditingOp = (SUPPORTED_PROPOSED_OPERATIONS as readonly string[]).includes(actionToolName);
+
+          if (!isRegistered && !isSupportedEditingOp) {
             throw new AgentSecurityError(
               `Proposed action references unallowlisted tool '${actionToolName}'.`
             );
@@ -239,14 +301,59 @@ export function validateGeminiDecision(
         }
       }
 
+      let validatedEditingPlan: AgentEditingPlan | undefined = undefined;
+      if (planObj.editingPlan) {
+        if (
+          typeof planObj.editingPlan === "object" &&
+          planObj.editingPlan !== null &&
+          "status" in planObj.editingPlan
+        ) {
+          const suppliedStatus = (planObj.editingPlan as Record<string, unknown>).status;
+          if (suppliedStatus !== undefined && suppliedStatus !== null && suppliedStatus !== "proposed") {
+            throw new AgentValidationError(
+              `Model-generated editing plan cannot self-assign status '${String(suppliedStatus)}'. Only 'proposed' status is allowed.`
+            );
+          }
+        }
+        validatedEditingPlan = validateEditingPlan(planObj.editingPlan);
+        validatedEditingPlan.status = "proposed";
+      } else if (validatedActions.length > 0) {
+        const ops = validatedActions
+          .filter((a) => (SUPPORTED_PROPOSED_OPERATIONS as readonly string[]).includes(a.toolName))
+          .map((a, idx) => ({
+            id: `op-${idx + 1}`,
+            type: a.toolName as ProposedOperationType,
+            description: a.description || `Proposed ${a.toolName}`,
+            params: a.params,
+            assetId: typeof a.params.assetId === "string" ? a.params.assetId : undefined,
+            clipId: typeof a.params.clipId === "string" ? a.params.clipId : undefined,
+            trackId: typeof a.params.trackId === "string" ? a.params.trackId : undefined,
+            timeRange: typeof a.params.timeRange === "object" ? (a.params.timeRange as any) : undefined
+          }));
+
+        if (ops.length > 0) {
+          validatedEditingPlan = {
+            id: crypto.randomUUID(),
+            requestId: crypto.randomUUID(),
+            projectId: "default",
+            summary: description.trim(),
+            operations: ops,
+            status: "proposed",
+            createdAt: new Date().toISOString()
+          };
+        }
+      }
+
       return {
         type: "ask_approval",
         plan: {
           description: description.trim(),
           proposedActions: validatedActions,
           estimatedImpact:
-            typeof planObj.estimatedImpact === "string" ? planObj.estimatedImpact.trim() : undefined
-        }
+            typeof planObj.estimatedImpact === "string" ? planObj.estimatedImpact.trim() : undefined,
+          editingPlan: validatedEditingPlan
+        },
+        editingPlan: validatedEditingPlan
       };
     }
 

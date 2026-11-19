@@ -40,10 +40,72 @@ export interface AgentApprovalAction {
   description?: string;
 }
 
+export type ProposedOperationType =
+  | "remove_silence"
+  | "split_clip"
+  | "trim_clip"
+  | "move_clip"
+  | "delete_clip";
+
+export const SUPPORTED_PROPOSED_OPERATIONS = [
+  "remove_silence",
+  "split_clip",
+  "trim_clip",
+  "move_clip",
+  "delete_clip"
+] as const;
+
+export type PlanStatus =
+  | "proposed"
+  | "approved"
+  | "rejected"
+  | "applied";
+
+export interface PlanEvidenceReference {
+  type: "speech" | "silence" | "scene";
+  assetId: string;
+  start?: number;
+  end?: number;
+  snippet?: string;
+  frameUrl?: string;
+}
+
+export interface ProposedOperation {
+  id: string;
+  type: ProposedOperationType;
+  description: string;
+  explanation?: string;
+  assetId?: string;
+  trackId?: string;
+  clipId?: string;
+  timeRange?: {
+    sourceStart?: number;
+    sourceEnd?: number;
+    timelineStart?: number;
+    timelineEnd?: number;
+  };
+  params: Record<string, unknown>;
+  evidence?: PlanEvidenceReference[];
+}
+
+export interface AgentEditingPlan {
+  id: string;
+  requestId: string;
+  projectId: string;
+  timelineId?: string;
+  summary: string;
+  operations: ProposedOperation[];
+  warnings?: string[];
+  assumptions?: string[];
+  status: PlanStatus;
+  createdAt: string;
+}
+
 export interface AgentApprovalPlan {
   description: string;
   proposedActions: AgentApprovalAction[];
   estimatedImpact?: string;
+  editingPlan?: AgentEditingPlan;
 }
 
 export interface AgentResult {
@@ -53,7 +115,7 @@ export interface AgentResult {
 
 export type AgentStepDecision =
   | { type: "tool_call"; toolName: string; params: Record<string, unknown> }
-  | { type: "ask_approval"; plan: AgentApprovalPlan }
+  | { type: "ask_approval"; plan: AgentApprovalPlan; editingPlan?: AgentEditingPlan }
   | { type: "finish"; result: AgentResult }
   | { type: "fail"; error: string };
 
@@ -68,6 +130,7 @@ export interface AgentRequest {
   limits: AgentRequestLimits;
   events: AgentEvent[];
   approvalPlan?: AgentApprovalPlan;
+  editingPlan?: AgentEditingPlan;
   result?: AgentResult;
   error?: string;
   createdAt: string;

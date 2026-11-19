@@ -8,6 +8,7 @@ import {
   type AgentEvent,
   type AgentResult,
   type AgentApprovalPlan,
+  type AgentEditingPlan,
   AGENT_SAFETY_LIMITS,
   isValidAgentStatusTransition
 } from "@agentcut/shared";
@@ -23,6 +24,7 @@ import {
   AgentStateTransitionError
 } from "./agent-errors.js";
 import { AgentToolRegistry } from "./agent-tools.js";
+import { createReadOnlyToolRegistry } from "./tools/index.js";
 import {
   DefaultAgentExecutionContext,
   type AgentPlanProvider
@@ -36,7 +38,7 @@ import {
 import { GeminiPlanProvider } from "./gemini/gemini-provider.js";
 
 // Global tool registry for the agent runtime
-const defaultToolRegistry = new AgentToolRegistry();
+const defaultToolRegistry = createReadOnlyToolRegistry();
 
 // In-memory active abort controllers for live cancellation
 const activeControllers = new Map<string, AbortController>();
@@ -272,6 +274,7 @@ export async function transitionAgentRequestStatus(
     events?: AgentEvent[];
     result?: AgentResult;
     approvalPlan?: AgentApprovalPlan;
+    editingPlan?: AgentEditingPlan;
     error?: string;
   }
 ): Promise<AgentRequest> {
@@ -322,6 +325,14 @@ export async function transitionAgentRequestStatus(
   }
   if (updates?.approvalPlan !== undefined) {
     updateFields.approvalPlan = updates.approvalPlan;
+  }
+  if (updates?.editingPlan !== undefined) {
+    updateFields.editingPlan = updates.editingPlan
+      ? {
+          ...updates.editingPlan,
+          status: "proposed"
+        }
+      : undefined;
   }
   if (updates?.error !== undefined) {
     updateFields.error = updates.error;
@@ -463,12 +474,14 @@ export async function executeAgentRequest(
       return toAgentRequestDTO(latestDoc);
     }
 
+    const effectivePlan = executionResult.editingPlan ?? executionResult.approvalPlan?.editingPlan;
     return await transitionAgentRequestStatus(requestId, executionResult.status, {
       iterations: executionResult.iterations,
       toolCallsCount: executionResult.toolCallsCount,
       events: executionResult.events,
       result: executionResult.result,
       approvalPlan: executionResult.approvalPlan,
+      editingPlan: effectivePlan ? { ...effectivePlan, status: "proposed" } : undefined,
       error: executionResult.error
     });
   } finally {

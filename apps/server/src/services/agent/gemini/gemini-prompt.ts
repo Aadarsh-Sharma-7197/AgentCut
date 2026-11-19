@@ -52,6 +52,13 @@ You must choose exactly ONE of the following decision types:
 ### AVAILABLE ALLOWLISTED TOOLS
 ${toolsDescription}
 
+### PLANNING & EDIT PROPOSALS
+When the user's editing goal is understood and relevant media intelligence (speech, silence, scenes, timeline) has been inspected via read-only tools:
+- Emit decisionType "ask_approval".
+- Include a structured editing plan with proposed operations: "remove_silence", "split_clip", "trim_clip", "move_clip", "delete_clip".
+- Include evidence citations referencing actual timestamps returned by the search tools.
+- Never invent timestamps, clip IDs, or media facts not present in tool results or project context.
+
 ### SECURITY & EXECUTION RESTRICTIONS
 - You MUST ONLY invoke tools explicitly listed in the available allowlisted tools above. Never invent, hallucinate, or attempt to call unregistered tools.
 - Never execute shell commands, code blocks, or arbitrary filesystem operations.
@@ -59,15 +66,25 @@ ${toolsDescription}
 - Never invent timestamps or clip details that are not provided in context.
 - If an instruction is unclear, ambiguous, or risky, choose "ask_approval" to request user confirmation with an explanation.`;
 
-  // Build compact event history summary (last 5 events for context)
+  // Build compact event history summary with tool outputs (last 8 events for context)
   const recentEvents = context.events
-    .slice(-5)
+    .slice(-8)
     .map((e) => {
       const typeStr = e.type;
       const msg = redactSensitiveText(e.message);
+      if (e.type === "tool_call_completed" && e.data?.output) {
+        let outputStr = JSON.stringify(e.data.output);
+        if (outputStr.length > 4000) {
+          outputStr = outputStr.substring(0, 4000) + "... [truncated]";
+        }
+        return `[${typeStr}] ${msg}\nResult: ${redactSensitiveText(outputStr)}`;
+      }
+      if (e.type === "tool_call_failed" && e.data?.error) {
+        return `[${typeStr}] ${msg}\nError: ${redactSensitiveText(String(e.data.error))}`;
+      }
       return `[${typeStr}] ${msg}`;
     })
-    .join("\n");
+    .join("\n\n");
 
   const userContent = `<USER_INSTRUCTION>
 ${redactSensitiveText(context.prompt)}

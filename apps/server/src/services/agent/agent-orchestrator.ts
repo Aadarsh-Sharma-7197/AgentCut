@@ -2,6 +2,7 @@ import type {
   AgentRequestStatus,
   AgentEvent,
   AgentApprovalPlan,
+  AgentEditingPlan,
   AgentResult
 } from "@agentcut/shared";
 import type { AgentExecutionContext, AgentPlanProvider } from "./agent-context.js";
@@ -20,6 +21,7 @@ export interface AgentExecutionResult {
   toolCallsCount: number;
   result?: AgentResult;
   approvalPlan?: AgentApprovalPlan;
+  editingPlan?: AgentEditingPlan;
   error?: string;
 }
 
@@ -96,17 +98,22 @@ export class AgentRuntimeOrchestrator {
         }
 
         if (decision.type === "ask_approval") {
+          const rawEditingPlan = decision.plan.editingPlan;
+          const editingPlan = rawEditingPlan
+            ? { ...rawEditingPlan, status: "proposed" as const }
+            : undefined;
           context.recordEvent(
             "approval_requested",
             "Agent requested user approval before continuing.",
-            { description: decision.plan.description }
+            { description: decision.plan.description, editingPlanId: editingPlan?.id }
           );
           return {
             status: "awaiting_approval",
             events: context.events,
             iterations: context.currentIteration,
             toolCallsCount: context.toolCallCount,
-            approvalPlan: decision.plan
+            approvalPlan: decision.plan,
+            editingPlan
           };
         }
 

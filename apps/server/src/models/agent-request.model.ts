@@ -5,6 +5,7 @@ import type {
   AgentRequestLimits,
   AgentEvent,
   AgentApprovalPlan,
+  AgentEditingPlan,
   AgentResult
 } from "@agentcut/shared";
 import { getDB } from "../config/db.js";
@@ -20,6 +21,7 @@ export interface AgentRequestDocument {
   limits: AgentRequestLimits;
   events: AgentEvent[];
   approvalPlan?: AgentApprovalPlan;
+  editingPlan?: AgentEditingPlan;
   result?: AgentResult;
   error?: string;
   createdAt: Date;
@@ -39,6 +41,7 @@ export function toAgentRequestDTO(doc: AgentRequestDocument): AgentRequest {
     limits: doc.limits,
     events: doc.events,
     approvalPlan: doc.approvalPlan,
+    editingPlan: doc.editingPlan ?? doc.approvalPlan?.editingPlan,
     result: doc.result,
     error: doc.error,
     createdAt: doc.createdAt.toISOString(),
