@@ -34,6 +34,7 @@ import {
 } from "./index.js";
 import { runRenderTests } from "./test-render.js";
 import { runAgentTests } from "./test-agent.js";
+import { runExecutionEngineTests } from "./test-execution.js";
 
 function runTimelineTests() {
   console.log("=== AgentCut Timeline Data Model Test Suite ===");
@@ -1395,6 +1396,11 @@ function runTimelineTests() {
   const agentRes = runAgentTests();
   passed += agentRes.passed;
   failed += agentRes.failed;
+
+  // [Test 22] Shared Pure Execution Engine (Step 6.4.2)
+  const execRes = runExecutionEngineTests();
+  passed += execRes.passed;
+  failed += execRes.failed;
 
   console.log(`\n=== Timeline Test Results: ${passed} passed, ${failed} failed ===`);
   if (failed > 0) {

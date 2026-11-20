@@ -1,7 +1,7 @@
 import type { Timeline, Track, Clip, TimelineSettings, TrackType } from "./types.js";
 import { validateTimeline, TimelineValidationError, type ValidateTimelineOptions } from "./validation.js";
 
-function generateId(): string {
+export function generateId(): string {
   // Pure lightweight fallback/UUID generator for universal shared environment (Node & Browser)
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
@@ -12,6 +12,7 @@ function generateId(): string {
 export interface CreateTimelineParams {
   projectId: string;
   id?: string;
+  revision?: number;
   settings?: Partial<TimelineSettings>;
   tracks?: Track[];
 }
@@ -48,6 +49,7 @@ export function createEmptyTimeline(
   const timeline: Timeline = {
     id: params.id || generateId(),
     projectId: params.projectId,
+    revision: params.revision ?? 1,
     tracks: params.tracks
       ? params.tracks.map((t) => ({ ...t, clips: t.clips.map((c) => ({ ...c })) }))
       : [],

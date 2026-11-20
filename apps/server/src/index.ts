@@ -34,7 +34,8 @@ import {
 } from "./services/scene-detection.service.js";
 import {
   initAgentRequestIndexes,
-  registerAgentShutdownHooks
+  registerAgentShutdownHooks,
+  reconcileDanglingExecutions
 } from "./services/agent/agent-request.service.js";
 import { projectRouter } from "./routes/project.routes.js";
 
@@ -87,6 +88,7 @@ export async function startServer() {
     await initTranscriptionIndexes();
     await initSceneDetectionIndexes();
     await initAgentRequestIndexes();
+    await reconcileDanglingExecutions();
     registerPipelineShutdownHooks();
     registerAudioExtractionShutdownHooks();
     registerSilenceDetectionShutdownHooks();

@@ -30,8 +30,18 @@ export interface Timeline {
   projectId: string;      // ID of associated project
   tracks: Track[];        // Collection of tracks
   settings: TimelineSettings; // Frame rate and resolution settings
+  revision?: number;      // Monotonically increasing revision counter (defaults to 1 if unset)
   createdAt: string;      // ISO timestamp
   updatedAt: string;      // ISO timestamp
+}
+
+/**
+ * Returns the timeline revision, defaulting to 1 if undefined or invalid.
+ */
+export function getTimelineRevision(timeline: Pick<Timeline, "revision">): number {
+  return typeof timeline.revision === "number" && Number.isInteger(timeline.revision) && timeline.revision >= 1
+    ? timeline.revision
+    : 1;
 }
 
 /**

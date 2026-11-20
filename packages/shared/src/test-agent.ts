@@ -39,15 +39,23 @@ export function runAgentTests(): { passed: number; failed: number } {
   assert(isValidAgentStatusTransition("processing", "completed"), "processing -> completed is valid");
   assert(isValidAgentStatusTransition("processing", "failed"), "processing -> failed is valid");
   assert(isValidAgentStatusTransition("processing", "canceled"), "processing -> canceled is valid");
+  assert(isValidAgentStatusTransition("awaiting_approval", "executing"), "awaiting_approval -> executing is valid");
   assert(isValidAgentStatusTransition("awaiting_approval", "processing"), "awaiting_approval -> processing is valid");
   assert(isValidAgentStatusTransition("awaiting_approval", "completed"), "awaiting_approval -> completed is valid");
   assert(isValidAgentStatusTransition("awaiting_approval", "failed"), "awaiting_approval -> failed is valid");
   assert(isValidAgentStatusTransition("awaiting_approval", "canceled"), "awaiting_approval -> canceled is valid");
+  assert(isValidAgentStatusTransition("executing", "completed"), "executing -> completed is valid");
+  assert(isValidAgentStatusTransition("executing", "failed"), "executing -> failed is valid");
+  assert(isValidAgentStatusTransition("executing", "canceled"), "executing -> canceled is valid");
 
   // 3. Invalid Lifecycle Transitions (Strict Rejection)
   assert(!isValidAgentStatusTransition("queued", "completed"), "queued -> completed is INVALID");
   assert(!isValidAgentStatusTransition("queued", "failed"), "queued -> failed is INVALID");
   assert(!isValidAgentStatusTransition("queued", "awaiting_approval"), "queued -> awaiting_approval is INVALID");
+  assert(!isValidAgentStatusTransition("queued", "executing"), "queued -> executing is INVALID");
+  assert(!isValidAgentStatusTransition("executing", "queued"), "executing -> queued is INVALID");
+  assert(!isValidAgentStatusTransition("executing", "processing"), "executing -> processing is INVALID");
+  assert(!isValidAgentStatusTransition("executing", "awaiting_approval"), "executing -> awaiting_approval is INVALID");
 
   // Terminal state: completed
   assert(!isValidAgentStatusTransition("completed", "queued"), "completed -> queued is INVALID");

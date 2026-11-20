@@ -187,6 +187,29 @@ import {
   validateEditingPlan,
   validateEditingPlanAgainstProject
 } from "./services/agent/plan-validator.js";
+import {
+  saveTimeline,
+  saveTimelineCAS,
+  TimelineConcurrencyError,
+  TimelineNotFoundError,
+  getTimelineByProject
+} from "./services/timeline.service.js";
+import { computePlanHash } from "./services/agent/plan-hash.js";
+import {
+  reconcileDanglingExecutions,
+  reconcileExecutingRequest,
+  approveAgentRequest,
+  rejectAgentRequest,
+  getAgentRequestRawById
+} from "./services/agent/agent-request.service.js";
+import {
+  PlanHashMismatchError,
+  StaleTimelineRevisionError,
+  RequestNotApprovableError,
+  ExecutionAlreadyStartedError,
+  ExecutionValidationFailedError,
+  ExecutionAbortedCrashError
+} from "./services/agent/agent-errors.js";
 import type { TranscriptData, TranscriptWord } from "@agentcut/shared";
 import { ObjectId } from "mongodb";
 import type { Server } from "http";
@@ -6135,6 +6158,778 @@ frame=    3 fps=0.0 q=-0.0 Lsize=N/A time=00:00:03.04 bitrate=N/A
         if (fs.existsSync(assetADiskPath)) fs.unlinkSync(assetADiskPath);
         fs.rmSync(transDirA, { recursive: true, force: true });
       } catch {}
+
+      // =========================================================================
+      // Test 46: Server Approval API, CAS Persistence & Execution Receipts (Step 6.4.3)
+      // =========================================================================
+      console.log("\n--- Test 46: Server Approval API, CAS Persistence & Execution Receipts (Step 6.4.3) ---");
+
+      // 46.1: Setup Project 46 & Media
+      console.log("  - 46.1: Setting up Step 6.4.3 project, media, and baseline timeline...");
+      const p46Res = await fetch(`${baseUrl}/api/projects`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Step 6.4.3 Verification Project" })
+      });
+      const p46Json = await p46Res.json();
+      const proj46Id = p46Json.data.id;
+
+      // Upload valid media asset
+      const form46 = new FormData();
+      const fileBlob46 = new Blob([fs.readFileSync(validMp4Path)], { type: "video/mp4" });
+      form46.append("file", fileBlob46, "test_p46.mp4");
+      const up46Res = await fetch(`${baseUrl}/api/projects/${proj46Id}/media`, {
+        method: "POST",
+        body: form46
+      });
+      const up46Json = await up46Res.json();
+      const asset46Id = up46Json.data.id;
+
+      // Baseline timeline with 2 clips separated by a gap:
+      // Clip 1: [0..10s] at timeline 0s
+      // Clip 2: [10..20s] at timeline 15s
+      const baseTracks46 = [
+        {
+          id: "tr_v46_1",
+          name: "Video 1",
+          type: "video" as const,
+          index: 0,
+          enabled: true,
+          clips: [
+            {
+              id: "cl_46_1",
+              assetId: asset46Id,
+              trackId: "tr_v46_1",
+              sourceStart: 0,
+              sourceEnd: 10,
+              timelineStart: 0,
+              name: "Clip 1"
+            },
+            {
+              id: "cl_46_2",
+              assetId: asset46Id,
+              trackId: "tr_v46_1",
+              sourceStart: 10,
+              sourceEnd: 20,
+              timelineStart: 15,
+              name: "Clip 2"
+            }
+          ]
+        }
+      ];
+
+      const tl46PutRes = await fetch(`${baseUrl}/api/projects/${proj46Id}/timeline`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tracks: baseTracks46,
+          settings: { frameRate: 30, width: 1920, height: 1080 }
+        })
+      });
+      const tl46PutJson = await tl46PutRes.json();
+      assert(tl46PutRes.status === 200, "Baseline timeline created with HTTP 200");
+      assert(tl46PutJson.data.revision === 1, "Initial timeline revision is 1");
+
+      // 46.2: Monotonic Revision Increment on Mutation
+      console.log("  - 46.2: Verifying monotonic revision increment on timeline mutation...");
+      const tl46MutRes = await fetch(`${baseUrl}/api/projects/${proj46Id}/timeline`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tracks: baseTracks46,
+          settings: { frameRate: 24, width: 1920, height: 1080 }
+        })
+      });
+      const tl46MutJson = await tl46MutRes.json();
+      assert(tl46MutJson.data.revision === 2, "Second mutation increments revision to 2");
+
+      // 46.3: Legacy Timeline Normalization, Stale Protection, and Manual vs CAS Consistency
+      console.log("  - 46.3: Verifying legacy timeline normalization, CAS persistence, and manual save consistency...");
+      const timelinesCol46 = getDB().collection("timelines");
+      // 46.3a: Simulate existing legacy timeline lacking revision field
+      await timelinesCol46.updateOne({ projectId: proj46Id }, { $unset: { revision: "" } });
+
+      const legacyFetch = await getTimelineByProject(proj46Id);
+      assert(legacyFetch?.revision === 1, "Legacy document without revision field normalizes to 1");
+
+      // 46.3b: Stale CAS write on legacy document must fail and must not increment revision
+      let staleLegacyFailed = false;
+      try {
+        await saveTimelineCAS(
+          proj46Id,
+          { tracks: baseTracks46, settings: { frameRate: 30, width: 1920, height: 1080 } },
+          { expectedRevision: 5, lastExecutionId: "stale_legacy_exec" }
+        );
+      } catch (err) {
+        if (err instanceof TimelineConcurrencyError) {
+          staleLegacyFailed = true;
+          assert(err.details?.expectedRevision === 5, "Stale CAS reports expectedRevision: 5");
+          assert(err.details?.actualRevision === 1, "Stale CAS reports actualRevision: 1");
+        }
+      }
+      assert(staleLegacyFailed, "Stale CAS write against legacy timeline is rejected");
+
+      // Verify legacy document still has no revision in DB and logical revision remains 1
+      const docAfterStale = await timelinesCol46.findOne({ projectId: proj46Id });
+      assert(docAfterStale?.revision === undefined, "Failed stale write does not mutate or increment revision");
+      const legacyFetchAfterStale = await getTimelineByProject(proj46Id);
+      assert(legacyFetchAfterStale?.revision === 1, "Logical revision remains strictly 1 after failed stale write");
+
+      // 46.3c: Manual saveTimeline on legacy document must increment logical revision 1 -> 2
+      const legacyManualResult = await saveTimeline(
+        proj46Id,
+        { tracks: baseTracks46, settings: { frameRate: 30, width: 1920, height: 1080 } }
+      );
+      assert(legacyManualResult.revision === 2, "First manual save on legacy document increments revision from 1 to 2");
+
+      // 46.3d: Subsequent manual save on the same document must increment 2 -> 3
+      const legacyManualResult2 = await saveTimeline(
+        proj46Id,
+        { tracks: baseTracks46, settings: { frameRate: 30, width: 1920, height: 1080 } }
+      );
+      assert(legacyManualResult2.revision === 3, "Subsequent manual save increments revision from 2 to 3");
+
+      // 46.3e: Reset to legacy document and verify saveTimelineCAS produces consistent revision 2
+      await timelinesCol46.updateOne(
+        { projectId: proj46Id },
+        {
+          $set: { tracks: baseTracks46, settings: { frameRate: 30, width: 1920, height: 1080 } },
+          $unset: { revision: "", lastExecutionId: "" }
+        }
+      );
+      const legacyCasResult = await saveTimelineCAS(
+        proj46Id,
+        { tracks: baseTracks46, settings: { frameRate: 30, width: 1920, height: 1080 } },
+        { expectedRevision: 1, lastExecutionId: "legacy_test_exec" }
+      );
+      assert(legacyCasResult.revision === 2, "CAS update on legacy document succeeds and sets revision to 2");
+      assert(legacyCasResult.revision === legacyManualResult.revision, "Manual save and CAS update produce consistent revision 2 on legacy documents");
+
+      // Reset baseline timeline to revision 1 for deterministic tests
+      await timelinesCol46.updateOne(
+        { projectId: proj46Id },
+        {
+          $set: {
+            tracks: baseTracks46,
+            settings: { frameRate: 30, width: 1920, height: 1080 },
+            revision: 1
+          },
+          $unset: { lastExecutionId: "" }
+        }
+      );
+      const verifiedBase = await getTimelineByProject(proj46Id);
+      assert(verifiedBase?.revision === 1, "Baseline timeline reset to revision 1");
+
+      // 46.4: Agent Tool Registry Isolation
+      console.log("  - 46.4: Verifying Agent Tool Registry does not expose approval or execution tools...");
+      const readOnlyRegistry46 = createReadOnlyToolRegistry();
+      assert(!readOnlyRegistry46.hasTool("approve"), "approve tool is NOT in registry");
+      assert(!readOnlyRegistry46.hasTool("execute"), "execute tool is NOT in registry");
+      assert(!readOnlyRegistry46.hasTool("apply_plan"), "apply_plan tool is NOT in registry");
+      assert(!readOnlyRegistry46.hasTool("approve_plan"), "approve_plan tool is NOT in registry");
+
+      // 46.5: Canonical Plan Hash Determinism & Tamper Sensitivity
+      console.log("  - 46.5: Verifying canonical plan hashing determinism and tamper protection...");
+      const sampleOps46 = [
+        {
+          id: "op-46-1",
+          type: "split_clip" as const,
+          description: "Split clip 1 at 5.0s",
+          clipId: "cl_46_1",
+          params: { splitTime: 5.0, newClipId: "cl_46_1_part2" }
+        },
+        {
+          id: "op-46-2",
+          type: "move_clip" as const,
+          description: "Shift clip 2 to 12.0s",
+          clipId: "cl_46_2",
+          params: { newTimelineStart: 12.0 }
+        }
+      ];
+
+      const hashA = computePlanHash({
+        requestId: "req_hash_1",
+        projectId: proj46Id,
+        planId: "plan_h1",
+        targetTimelineRevision: 1,
+        operations: sampleOps46
+      });
+      const hashB = computePlanHash({
+        requestId: "req_hash_1",
+        projectId: proj46Id,
+        planId: "plan_h1",
+        targetTimelineRevision: 1,
+        operations: sampleOps46
+      });
+      assert(hashA === hashB, "computePlanHash is 100% deterministic");
+
+      const hashRevTampered = computePlanHash({
+        requestId: "req_hash_1",
+        projectId: proj46Id,
+        planId: "plan_h1",
+        targetTimelineRevision: 2, // Changed revision
+        operations: sampleOps46
+      });
+      assert(hashA !== hashRevTampered, "Tampering with targetTimelineRevision produces distinct hash");
+
+      const hashParamTampered = computePlanHash({
+        requestId: "req_hash_1",
+        projectId: proj46Id,
+        planId: "plan_h1",
+        targetTimelineRevision: 1,
+        operations: [
+          { ...sampleOps46[0], params: { splitTime: 4.0 } }, // Altered splitTime
+          sampleOps46[1]
+        ]
+      });
+      assert(hashA !== hashParamTampered, "Tampering with operation parameter produces distinct hash");
+
+      const hashOrderTampered = computePlanHash({
+        requestId: "req_hash_1",
+        projectId: proj46Id,
+        planId: "plan_h1",
+        targetTimelineRevision: 1,
+        operations: [sampleOps46[1], sampleOps46[0]] // Reversed order
+      });
+      assert(hashA !== hashOrderTampered, "Tampering with operation order produces distinct hash");
+
+      const hashAssetTampered = computePlanHash({
+        requestId: "req_hash_1",
+        projectId: proj46Id,
+        planId: "plan_h1",
+        targetTimelineRevision: 1,
+        operations: [
+          { ...sampleOps46[0], assetId: "ast_tampered_diff" },
+          sampleOps46[1]
+        ]
+      });
+      assert(hashA !== hashAssetTampered, "Tampering with operation assetId produces distinct hash");
+
+      // 46.6: Plan Proposal Binds Live Revision & Canonical Hash
+      console.log("  - 46.6: Verifying plan proposal automatically binds live revision and server hash...");
+      const planningProvider46 = {
+        async generateStep() {
+          return {
+            type: "ask_approval" as const,
+            plan: {
+              description: "Approved split and move workflow",
+              proposedActions: [],
+              editingPlan: {
+                id: "plan_approved_46",
+                requestId: "req_to_fill",
+                projectId: proj46Id,
+                summary: "Split and move",
+                operations: sampleOps46,
+                status: "proposed" as const,
+                createdAt: new Date().toISOString()
+              }
+            }
+          };
+        }
+      };
+
+      const planReq46 = await createAgentRequest(proj46Id, { prompt: "Split clip 1 and move clip 2" });
+      const executedPlanReq46 = await executeAgentRequest(proj46Id, planReq46.id, planningProvider46);
+
+      assert(executedPlanReq46.status === "awaiting_approval", "Request is in awaiting_approval status");
+      assert(executedPlanReq46.editingPlan !== undefined, "editingPlan is populated");
+      assert(executedPlanReq46.editingPlan?.targetTimelineRevision === 1, "targetTimelineRevision is bound to live revision 1");
+      assert(Boolean(executedPlanReq46.editingPlan?.planHash), "Server computed canonical planHash");
+      assert(executedPlanReq46.editingPlan?.status === "proposed", "Plan status is strictly proposed");
+
+      const expectedServerHash = computePlanHash({
+        requestId: planReq46.id,
+        projectId: proj46Id,
+        planId: executedPlanReq46.editingPlan!.id,
+        targetTimelineRevision: 1,
+        operations: sampleOps46
+      });
+      assert(executedPlanReq46.editingPlan?.planHash === expectedServerHash, "Bound planHash matches canonical calculation");
+
+      // 46.7: Approval Payload Validation (Missing / Malformed Body)
+      console.log("  - 46.7: Verifying approval input validation...");
+      const missingBodyRes = await fetch(`${baseUrl}/api/projects/${proj46Id}/agent/requests/${planReq46.id}/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({})
+      });
+      const missingBodyJson = await missingBodyRes.json();
+      assert(missingBodyRes.status === 400, "Missing planHash rejected with 400");
+      assert(missingBodyJson.code === "PLAN_HASH_MISMATCH", "Returns error code PLAN_HASH_MISMATCH");
+
+      const badRevRes = await fetch(`${baseUrl}/api/projects/${proj46Id}/agent/requests/${planReq46.id}/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ planHash: expectedServerHash, expectedTimelineRevision: -1 })
+      });
+      const badRevJson = await badRevRes.json();
+      assert(badRevRes.status === 400, "Negative expectedTimelineRevision rejected with 400");
+      assert(badRevJson.code === "STALE_TIMELINE_REVISION", "Returns error code STALE_TIMELINE_REVISION");
+
+      // 46.8: Plan Hash Mismatch & Stored Plan Tamper Protection
+      console.log("  - 46.8: Verifying hash mismatch and tampered plan protection...");
+      const wrongHashRes = await fetch(`${baseUrl}/api/projects/${proj46Id}/agent/requests/${planReq46.id}/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ planHash: "bad_hash_0123456789abcdef", expectedTimelineRevision: 1 })
+      });
+      const wrongHashJson = await wrongHashRes.json();
+      assert(wrongHashRes.status === 400, "Tampered/wrong planHash rejected with 400");
+      assert(wrongHashJson.code === "PLAN_HASH_MISMATCH", "Returns PLAN_HASH_MISMATCH");
+
+      // Stored plan tampering check
+      await agentRequestsCol.updateOne(
+        { requestId: planReq46.id },
+        { $set: { "editingPlan.operations.0.params.splitTime": 99.0 } }
+      );
+      const tamperedStoredRes = await fetch(`${baseUrl}/api/projects/${proj46Id}/agent/requests/${planReq46.id}/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ planHash: expectedServerHash, expectedTimelineRevision: 1 })
+      });
+      const tamperedStoredJson = await tamperedStoredRes.json();
+      assert(tamperedStoredRes.status === 400, "Tampered stored plan rejected with 400");
+      assert(tamperedStoredJson.code === "PLAN_HASH_MISMATCH", "Returns PLAN_HASH_MISMATCH on stored tampering");
+
+      // Restore legitimate plan
+      await agentRequestsCol.updateOne(
+        { requestId: planReq46.id },
+        { $set: { "editingPlan.operations.0.params.splitTime": 5.0 } }
+      );
+
+      // 46.9: Stale Timeline Revision Rejection
+      console.log("  - 46.9: Verifying stale timeline revision conflict rejection...");
+      const wrongRevRes = await fetch(`${baseUrl}/api/projects/${proj46Id}/agent/requests/${planReq46.id}/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ planHash: expectedServerHash, expectedTimelineRevision: 99 })
+      });
+      const wrongRevJson = await wrongRevRes.json();
+      assert(wrongRevRes.status === 409, "Mismatched expectedTimelineRevision rejected with 409 Conflict");
+      assert(wrongRevJson.code === "STALE_TIMELINE_REVISION", "Returns STALE_TIMELINE_REVISION code");
+      assert(wrongRevJson.details.expectedRevision === 1, "Details report expected revision 1");
+
+      // 46.10: Request / Project Ownership Mismatch
+      console.log("  - 46.10: Verifying project ownership mismatch rejection...");
+      const p46OtherRes = await fetch(`${baseUrl}/api/projects`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Other Project" })
+      });
+      const p46OtherJson = await p46OtherRes.json();
+      const proj46OtherId = p46OtherJson.data.id;
+
+      const crossProjApproveRes = await fetch(
+        `${baseUrl}/api/projects/${proj46OtherId}/agent/requests/${planReq46.id}/approve`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ planHash: expectedServerHash, expectedTimelineRevision: 1 })
+        }
+      );
+      assert(crossProjApproveRes.status === 404, "Cross-project approval request rejected with 404");
+
+      // 46.11: Atomic Abort on Operation Validation Failure (Zero Partial Mutation)
+      console.log("  - 46.11: Verifying atomic abort when an operation in plan fails...");
+      const badOps46 = [
+        {
+          id: "op-bad-1",
+          type: "split_clip" as const,
+          description: "Valid split",
+          clipId: "cl_46_1",
+          params: { splitTime: 5.0, newClipId: "cl_46_1_p2" }
+        },
+        {
+          id: "op-bad-2",
+          type: "delete_clip" as const,
+          description: "Invalid delete on ghost clip",
+          clipId: "nonexistent_ghost_clip",
+          params: {}
+        }
+      ];
+
+      const badPlanReq = await createAgentRequest(proj46Id, { prompt: "Bad plan" });
+      const badOpsHash = computePlanHash({
+        requestId: badPlanReq.id,
+        projectId: proj46Id,
+        planId: "plan_bad",
+        targetTimelineRevision: 1,
+        operations: badOps46
+      });
+
+      await agentRequestsCol.updateOne(
+        { requestId: badPlanReq.id },
+        {
+          $set: {
+            status: "awaiting_approval",
+            editingPlan: {
+              id: "plan_bad",
+              requestId: badPlanReq.id,
+              projectId: proj46Id,
+              summary: "Failing plan",
+              operations: badOps46,
+              targetTimelineRevision: 1,
+              planHash: badOpsHash,
+              status: "proposed",
+              createdAt: new Date().toISOString()
+            }
+          }
+        }
+      );
+
+      const badApproveRes = await fetch(`${baseUrl}/api/projects/${proj46Id}/agent/requests/${badPlanReq.id}/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ planHash: badOpsHash, expectedTimelineRevision: 1 })
+      });
+      const badApproveJson = await badApproveRes.json();
+      assert(badApproveRes.status === 422, "Failing operation rejected with HTTP 422");
+      assert(badApproveJson.code === "EXECUTION_VALIDATION_FAILED", "Returns EXECUTION_VALIDATION_FAILED code");
+
+      // CRITICAL CHECK: Timeline in DB must be 100% UNTOUCHED
+      const tlAfterBad = await getTimelineByProject(proj46Id);
+      assert(tlAfterBad?.revision === 1, "Timeline revision remains strictly 1 after aborted execution");
+      assert(tlAfterBad?.tracks[0].clips.length === 2, "Timeline still contains exactly 2 original clips (zero partial split)");
+
+      // 46.12: Successful Approved Execution & Single Revision Increment
+      console.log("  - 46.12: Verifying successful approved execution and CAS persistence...");
+      const approveRes = await fetch(`${baseUrl}/api/projects/${proj46Id}/agent/requests/${planReq46.id}/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ planHash: expectedServerHash, expectedTimelineRevision: 1 })
+      });
+      const approveJson = await approveRes.json();
+      assert(approveRes.status === 200, "Approval succeeds with HTTP 200 OK");
+      assert(approveJson.data.request.status === "completed", "Request transitions to 'completed'");
+      assert(approveJson.data.request.editingPlan.status === "applied", "editingPlan.status is 'applied'");
+      assert(approveJson.data.receipt.status === "committed", "executionReceipt.status is 'committed'");
+      assert(approveJson.data.receipt.targetTimelineRevision === 1, "Receipt target revision is 1");
+      assert(approveJson.data.receipt.committedTimelineRevision === 2, "Receipt committed revision is 2");
+      assert(approveJson.data.receipt.operationsApplied === 2, "Receipt operationsApplied is 2");
+      assert(approveJson.data.timeline.revision === 2, "Timeline revision incremented exactly ONCE from 1 to 2");
+
+      // Verify committed timeline contents in MongoDB
+      const liveTlDocAfter = await timelinesCol46.findOne({ projectId: proj46Id });
+      assert(liveTlDocAfter?.revision === 2, "Live timeline in MongoDB has revision 2");
+      assert(liveTlDocAfter?.lastExecutionId === approveJson.data.receipt.executionId, "Live timeline has verifiable lastExecutionId commit evidence");
+      assert(liveTlDocAfter?.tracks[0].clips.length === 3, "Live timeline now contains 3 clips (split + moved)");
+
+      // 46.13: Duplicate Approval / Replay Protection
+      console.log("  - 46.13: Verifying duplicate approval replay protection...");
+      const replayRes = await fetch(`${baseUrl}/api/projects/${proj46Id}/agent/requests/${planReq46.id}/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ planHash: expectedServerHash, expectedTimelineRevision: 1 })
+      });
+      const replayJson = await replayRes.json();
+      assert(replayRes.status === 409, "Replaying approval on completed request rejected with 409 Conflict");
+      assert(replayJson.code === "REQUEST_NOT_APPROVABLE", "Returns REQUEST_NOT_APPROVABLE code");
+
+      // 46.14: Concurrent Simultaneous Approvals (Atomic Claim)
+      console.log("  - 46.14: Verifying atomic claim under two simultaneous approval calls...");
+      // Current timeline revision is 2
+      const concurrentOps = [
+        {
+          id: "op-conc-1",
+          type: "move_clip" as const,
+          description: "Move clip 2",
+          clipId: "cl_46_2",
+          params: { newTimelineStart: 25.0 }
+        }
+      ];
+
+      const concReq = await createAgentRequest(proj46Id, { prompt: "Concurrent test" });
+      const concHash = computePlanHash({
+        requestId: concReq.id,
+        projectId: proj46Id,
+        planId: "plan_conc",
+        targetTimelineRevision: 2,
+        operations: concurrentOps
+      });
+
+      await agentRequestsCol.updateOne(
+        { requestId: concReq.id },
+        {
+          $set: {
+            status: "awaiting_approval",
+            editingPlan: {
+              id: "plan_conc",
+              requestId: concReq.id,
+              projectId: proj46Id,
+              summary: "Concurrent move",
+              operations: concurrentOps,
+              targetTimelineRevision: 2,
+              planHash: concHash,
+              status: "proposed",
+              createdAt: new Date().toISOString()
+            }
+          }
+        }
+      );
+
+      // Fire two simultaneous approve requests
+      const [concRes1, concRes2] = await Promise.all([
+        fetch(`${baseUrl}/api/projects/${proj46Id}/agent/requests/${concReq.id}/approve`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ planHash: concHash, expectedTimelineRevision: 2 })
+        }),
+        fetch(`${baseUrl}/api/projects/${proj46Id}/agent/requests/${concReq.id}/approve`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ planHash: concHash, expectedTimelineRevision: 2 })
+        })
+      ]);
+
+      const statuses = [concRes1.status, concRes2.status].sort();
+      assert(statuses[0] === 200 && statuses[1] === 409, "Under simultaneous approvals, exactly ONE succeeds (200) and ONE fails (409 Conflict)");
+
+      const tlAfterConc = await getTimelineByProject(proj46Id);
+      assert(tlAfterConc?.revision === 3, "Timeline revision incremented exactly ONCE from 2 to 3 under concurrency");
+
+      // 46.15: Crash Recovery Before Timeline Commit (Window 1)
+      console.log("  - 46.15: Verifying crash recovery when server crashed before timeline commit...");
+      const crashReq1 = await createAgentRequest(proj46Id, { prompt: "Crash before commit" });
+      const crashExecId1 = crypto.randomUUID();
+      await agentRequestsCol.updateOne(
+        { requestId: crashReq1.id },
+        {
+          $set: {
+            status: "executing",
+            executionReceipt: {
+              executionId: crashExecId1,
+              targetTimelineRevision: 3,
+              committedTimelineRevision: 4,
+              startedAt: new Date().toISOString(),
+              operationsApplied: 0,
+              status: "executing"
+            }
+          }
+        }
+      );
+
+      // Timeline in DB does NOT have lastExecutionId: crashExecId1
+      // Simulate server reboot reconciliation
+      const recoveredCount1 = await reconcileDanglingExecutions();
+      assert(recoveredCount1 >= 1, "Startup crash recovery detected dangling executing request");
+
+      const postCrashDoc1 = await getAgentRequestRawById(crashReq1.id);
+      assert(postCrashDoc1?.status === "failed", "Uncommitted executing request reconciled to 'failed'");
+      assert(postCrashDoc1?.executionReceipt?.status === "failed", "executionReceipt marked 'failed'");
+      assert(postCrashDoc1?.error?.includes("uncommitted server crash"), "Clear crash abort error recorded");
+
+      const tlAfterCrash1 = await getTimelineByProject(proj46Id);
+      assert(tlAfterCrash1?.revision === 3, "Timeline revision remains 3 (never blindly re-executed or mutated)");
+
+      // 46.16: Crash Recovery After Timeline Commit (Window 2)
+      console.log("  - 46.16: Verifying crash recovery when server crashed after timeline commit...");
+      const crashReq2 = await createAgentRequest(proj46Id, { prompt: "Crash after commit" });
+      const crashExecId2 = crypto.randomUUID();
+      await agentRequestsCol.updateOne(
+        { requestId: crashReq2.id },
+        {
+          $set: {
+            status: "executing",
+            editingPlan: {
+              id: "plan_crash2",
+              requestId: crashReq2.id,
+              projectId: proj46Id,
+              summary: "Crash after commit plan",
+              operations: concurrentOps,
+              targetTimelineRevision: 3,
+              planHash: "hash_crash2",
+              status: "proposed",
+              createdAt: new Date().toISOString()
+            },
+            executionReceipt: {
+              executionId: crashExecId2,
+              targetTimelineRevision: 3,
+              committedTimelineRevision: 4,
+              startedAt: new Date().toISOString(),
+              operationsApplied: 1,
+              status: "executing"
+            }
+          }
+        }
+      );
+
+      // Simulate that saveTimelineCAS committed to MongoDB before server crashed
+      await timelinesCol46.updateOne(
+        { projectId: proj46Id },
+        {
+          $set: {
+            revision: 4,
+            lastExecutionId: crashExecId2
+          }
+        }
+      );
+
+      // Trigger recovery sweep
+      const recoveredCount2 = await reconcileDanglingExecutions();
+      assert(recoveredCount2 >= 1, "Startup crash recovery processed post-commit executing request");
+
+      const postCrashDoc2 = await getAgentRequestRawById(crashReq2.id);
+      assert(postCrashDoc2?.status === "completed", "Committed executing request reconciled to 'completed'");
+      assert(postCrashDoc2?.editingPlan?.status === "applied", "editingPlan marked 'applied'");
+      assert(postCrashDoc2?.executionReceipt?.status === "committed", "executionReceipt marked 'committed'");
+
+      const apiFetchedCrash2 = await getAgentRequestById(proj46Id, crashReq2.id);
+      assert(apiFetchedCrash2?.status === "completed", "API getAgentRequestById returns completed state");
+
+      // 46.16b: Crash Recovery Rejection When Timeline Revision Advanced Past Execution
+      console.log("  - 46.16b: Verifying crash recovery rejects old execution when timeline advanced by manual edit...");
+      const crashReq3 = await createAgentRequest(proj46Id, { prompt: "Superseded execution" });
+      const crashExecId3 = crypto.randomUUID();
+      await agentRequestsCol.updateOne(
+        { requestId: crashReq3.id },
+        {
+          $set: {
+            status: "executing",
+            editingPlan: {
+              id: "plan_crash3",
+              requestId: crashReq3.id,
+              projectId: proj46Id,
+              summary: "Superseded plan",
+              operations: concurrentOps,
+              targetTimelineRevision: 11,
+              planHash: "hash_crash3",
+              status: "proposed",
+              createdAt: new Date().toISOString()
+            },
+            executionReceipt: {
+              executionId: crashExecId3,
+              targetTimelineRevision: 11,
+              committedTimelineRevision: 12,
+              startedAt: new Date().toISOString(),
+              operationsApplied: 1,
+              status: "executing"
+            }
+          }
+        }
+      );
+
+      // 1. Simulate that execution crashExecId3 committed revision 12 with lastExecutionId = crashExecId3
+      // 2. Then simulate user manual edit advancing timeline to revision 13 while lastExecutionId remains crashExecId3
+      await timelinesCol46.updateOne(
+        { projectId: proj46Id },
+        {
+          $set: {
+            revision: 13,
+            lastExecutionId: crashExecId3 // Still contains executionId from the prior execution
+          }
+        }
+      );
+
+      // Run recovery for the old execution request
+      const rawExecutingDoc3 = await getAgentRequestRawById(crashReq3.id);
+      assert(rawExecutingDoc3 !== null, "rawExecutingDoc3 exists");
+      const postRecoveryDoc3 = await reconcileExecutingRequest(rawExecutingDoc3!);
+
+      // Assert that recovery refuses to falsely claim the old execution represents current timeline state
+      assert(postRecoveryDoc3.status === "failed", "Superseded execution is reconciled to 'failed' (NOT 'completed')");
+      assert(postRecoveryDoc3.editingPlan?.status === "proposed", "editingPlan remains 'proposed' (NOT 'applied')");
+      assert(postRecoveryDoc3.executionReceipt?.status === "failed", "executionReceipt is 'failed' (NOT 'committed')");
+      assert(
+        postRecoveryDoc3.error?.includes("revision has advanced"),
+        "Clear error explanation that timeline revision advanced past committed revision"
+      );
+
+      // Verify legitimate recovery works when BOTH executionId and committedTimelineRevision match
+      const crashReqLegit = await createAgentRequest(proj46Id, { prompt: "Legit recovery test" });
+      const legitExecId = crypto.randomUUID();
+      await agentRequestsCol.updateOne(
+        { requestId: crashReqLegit.id },
+        {
+          $set: {
+            status: "executing",
+            editingPlan: {
+              id: "plan_legit",
+              requestId: crashReqLegit.id,
+              projectId: proj46Id,
+              summary: "Legitimate recovery plan",
+              operations: concurrentOps,
+              targetTimelineRevision: 13,
+              planHash: "hash_legit",
+              status: "proposed",
+              createdAt: new Date().toISOString()
+            },
+            executionReceipt: {
+              executionId: legitExecId,
+              targetTimelineRevision: 13,
+              committedTimelineRevision: 14,
+              startedAt: new Date().toISOString(),
+              operationsApplied: 1,
+              status: "executing"
+            }
+          }
+        }
+      );
+
+      // Timeline committed at revision 14 with matching lastExecutionId: legitExecId
+      await timelinesCol46.updateOne(
+        { projectId: proj46Id },
+        {
+          $set: {
+            revision: 14,
+            lastExecutionId: legitExecId
+          }
+        }
+      );
+
+      const rawLegitDoc = await getAgentRequestRawById(crashReqLegit.id);
+      assert(rawLegitDoc !== null, "rawLegitDoc exists");
+      const postLegitDoc = await reconcileExecutingRequest(rawLegitDoc!);
+      assert(postLegitDoc.status === "completed", "Legitimate execution with matching ID AND revision reconciles to 'completed'");
+      assert(postLegitDoc.editingPlan?.status === "applied", "Legitimate execution marks editingPlan 'applied'");
+      assert(postLegitDoc.executionReceipt?.status === "committed", "Legitimate execution marks executionReceipt 'committed'");
+
+      // 46.17: Plan Rejection Endpoint
+      console.log("  - 46.17: Verifying user plan rejection endpoint...");
+      const rejectReq46 = await createAgentRequest(proj46Id, { prompt: "Plan to reject" });
+      await agentRequestsCol.updateOne(
+        { requestId: rejectReq46.id },
+        {
+          $set: {
+            status: "awaiting_approval",
+            editingPlan: {
+              id: "plan_reject",
+              requestId: rejectReq46.id,
+              projectId: proj46Id,
+              summary: "To reject",
+              operations: concurrentOps,
+              targetTimelineRevision: 4,
+              planHash: "hash_rej",
+              status: "proposed",
+              createdAt: new Date().toISOString()
+            }
+          }
+        }
+      );
+
+      const rejectRes = await fetch(`${baseUrl}/api/projects/${proj46Id}/agent/requests/${rejectReq46.id}/reject`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: "User prefers a different cut" })
+      });
+      const rejectJson = await rejectRes.json();
+      assert(rejectRes.status === 200, "Reject returns HTTP 200 OK");
+      assert(rejectJson.data.status === "canceled", "Request status transitions to 'canceled'");
+      assert(rejectJson.data.editingPlan.status === "rejected", "editingPlan.status transitions to 'rejected'");
+
+      const postRejectApproveRes = await fetch(`${baseUrl}/api/projects/${proj46Id}/agent/requests/${rejectReq46.id}/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ planHash: "hash_rej", expectedTimelineRevision: 4 })
+      });
+      assert(postRejectApproveRes.status === 409, "Approving a rejected request is rejected with 409 Conflict");
+
+      // 46.18: Step 6.4.3 Project Cleanup
+      console.log("  - 46.18: Cleaning up Step 6.4.3 test projects...");
+      await fetch(`${baseUrl}/api/projects/${proj46Id}`, { method: "DELETE" });
+      await fetch(`${baseUrl}/api/projects/${proj46OtherId}`, { method: "DELETE" });
+
+      const remainingDocs46 = await agentRequestsCol.find({ projectId: proj46Id }).toArray();
+      assert(remainingDocs46.length === 0, "Deleting Project 46 cascade-deleted all agent requests");
 
 
 

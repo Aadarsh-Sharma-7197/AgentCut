@@ -193,6 +193,16 @@ export function validateTimeline(
     errors.push({ path: "timeline.projectId", message: "Project ID must be a non-empty string." });
   }
 
+  // 1b. Revision check (when present, must be positive integer >= 1)
+  if (timeline.revision !== undefined) {
+    if (typeof timeline.revision !== "number" || !Number.isInteger(timeline.revision) || timeline.revision < 1) {
+      errors.push({
+        path: "timeline.revision",
+        message: `Timeline revision must be a positive integer >= 1 (got ${timeline.revision}).`
+      });
+    }
+  }
+
   // 2. Settings check
   if (!timeline.settings || typeof timeline.settings !== "object") {
     errors.push({ path: "timeline.settings", message: "Timeline settings must be defined." });

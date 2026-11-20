@@ -275,6 +275,8 @@ export function validateEditingPlan(
     requestId,
     projectId,
     timelineId,
+    targetTimelineRevision: typeof obj.targetTimelineRevision === "number" && Number.isInteger(obj.targetTimelineRevision) ? obj.targetTimelineRevision : undefined,
+    planHash: typeof obj.planHash === "string" && obj.planHash.trim() ? obj.planHash.trim() : undefined,
     summary,
     operations: validatedOperations,
     warnings,

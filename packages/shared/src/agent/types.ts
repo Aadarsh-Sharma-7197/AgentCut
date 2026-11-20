@@ -2,6 +2,7 @@ export type AgentRequestStatus =
   | "queued"
   | "processing"
   | "awaiting_approval"
+  | "executing"
   | "completed"
   | "failed"
   | "canceled";
@@ -16,6 +17,9 @@ export type AgentEventType =
   | "approval_requested"
   | "approval_granted"
   | "approval_rejected"
+  | "execution_started"
+  | "execution_completed"
+  | "execution_failed"
   | "request_completed"
   | "request_failed"
   | "request_canceled";
@@ -88,11 +92,24 @@ export interface ProposedOperation {
   evidence?: PlanEvidenceReference[];
 }
 
+export interface ExecutionReceipt {
+  executionId: string;
+  targetTimelineRevision: number;
+  committedTimelineRevision: number;
+  startedAt: string;
+  committedAt?: string;
+  operationsApplied: number;
+  status: "executing" | "committed" | "failed";
+  error?: string;
+}
+
 export interface AgentEditingPlan {
   id: string;
   requestId: string;
   projectId: string;
   timelineId?: string;
+  targetTimelineRevision?: number;
+  planHash?: string;
   summary: string;
   operations: ProposedOperation[];
   warnings?: string[];
@@ -131,6 +148,7 @@ export interface AgentRequest {
   events: AgentEvent[];
   approvalPlan?: AgentApprovalPlan;
   editingPlan?: AgentEditingPlan;
+  executionReceipt?: ExecutionReceipt;
   result?: AgentResult;
   error?: string;
   createdAt: string;
@@ -149,7 +167,8 @@ export interface CreateAgentRequestDTO {
 export const VALID_STATUS_TRANSITIONS: Record<AgentRequestStatus, readonly AgentRequestStatus[]> = {
   queued: ["processing", "canceled"],
   processing: ["awaiting_approval", "completed", "failed", "canceled"],
-  awaiting_approval: ["processing", "completed", "failed", "canceled"],
+  awaiting_approval: ["executing", "processing", "completed", "failed", "canceled"],
+  executing: ["completed", "failed", "canceled"],
   completed: [],
   failed: [],
   canceled: []

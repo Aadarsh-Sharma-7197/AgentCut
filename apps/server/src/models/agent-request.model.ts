@@ -6,7 +6,8 @@ import type {
   AgentEvent,
   AgentApprovalPlan,
   AgentEditingPlan,
-  AgentResult
+  AgentResult,
+  ExecutionReceipt
 } from "@agentcut/shared";
 import { getDB } from "../config/db.js";
 
@@ -22,6 +23,7 @@ export interface AgentRequestDocument {
   events: AgentEvent[];
   approvalPlan?: AgentApprovalPlan;
   editingPlan?: AgentEditingPlan;
+  executionReceipt?: ExecutionReceipt;
   result?: AgentResult;
   error?: string;
   createdAt: Date;
@@ -42,6 +44,7 @@ export function toAgentRequestDTO(doc: AgentRequestDocument): AgentRequest {
     events: doc.events,
     approvalPlan: doc.approvalPlan,
     editingPlan: doc.editingPlan ?? doc.approvalPlan?.editingPlan,
+    executionReceipt: doc.executionReceipt,
     result: doc.result,
     error: doc.error,
     createdAt: doc.createdAt.toISOString(),
