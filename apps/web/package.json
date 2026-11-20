@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "test": "tsx src/test-timeline-ui.ts",
+    "test": "tsx src/test-timeline-ui.ts && tsx src/test-agent-workflow.ts",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "clean": "node -e \"try { fs.rmSync('dist', { recursive: true, force: true }) } catch (e) {}\""

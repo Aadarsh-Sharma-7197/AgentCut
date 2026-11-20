@@ -1479,4 +1479,42 @@
   opacity: 0.9;
 }
 
+.timeline-agent-btn {
+  background-color: #1e1b4b;
+  border: 1px solid #4f46e5;
+  color: #c7d2fe;
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 0.4rem 0.8rem;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  transition: all 0.15s ease;
+}
+
+.timeline-agent-btn:hover {
+  background-color: #312e81;
+  border-color: #6366f1;
+}
+
+.timeline-agent-btn.active {
+  background-color: #4338ca;
+  color: #ffffff;
+  border-color: #818cf8;
+}
+
+.timeline-agent-executing-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  background-color: #312e81;
+  color: #a5b4fc;
+  border: 1px solid #4f46e5;
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+}
 

@@ -31,6 +31,8 @@ import { TimelineRuler } from "./TimelineRuler";
 import { TimelineTrack } from "./TimelineTrack";
 import { TimelinePlayhead } from "./TimelinePlayhead";
 import { TimelineExportModal } from "./TimelineExportModal";
+import { AgentAssistantPanel } from "../agent/AgentAssistantPanel";
+import type { ApproveAgentRequestResponse } from "../../api/agent";
 import "./timeline.css";
 
 interface TimelineEditorProps {
@@ -103,6 +105,11 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
   // Export MP4 modal state
   const [isExportModalOpen, setIsExportModalOpen] = useState<boolean>(false);
 
+  // Agent Assistant dock state
+  const [isAgentOpen, setIsAgentOpen] = useState<boolean>(true);
+  const [isAgentExecuting, setIsAgentExecuting] = useState<boolean>(false);
+  const lastSynchronizedExecutionId = useRef<string | null>(null);
+
   const updateHistoryFlags = useCallback(() => {
     if (historyRef.current) {
       setCanUndo(historyRef.current.canUndo());
@@ -135,6 +142,56 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
   useEffect(() => {
     loadTimeline();
   }, [loadTimeline]);
+
+  /**
+   * Prepares the editor before an agent approval request is sent to the backend.
+   * Locks timeline editing and drains any pending local saves.
+   */
+  const handleBeforeApprove = useCallback(async () => {
+    setIsAgentExecuting(true);
+    if (saveQueueRef.current && saveQueueRef.current.isBusy()) {
+      await saveQueueRef.current.waitForIdle();
+    }
+  }, []);
+
+  /**
+   * Applies an approved agent plan execution authoritatively to the live timeline,
+   * save queue, and history stack as exactly one undoable external step.
+   */
+  const handleApplyAgentExecution = useCallback(
+    async (res: ApproveAgentRequestResponse) => {
+      try {
+        const { timeline: committedTimeline, receipt } = res;
+        if (!committedTimeline || !receipt) return;
+
+        // 1. Prevent duplicate timeline application
+        if (lastSynchronizedExecutionId.current === receipt.executionId) {
+          return;
+        }
+
+        // 2. Prevent older pending local save-queue operations from overwriting the agent-executed timeline
+        if (saveQueueRef.current && saveQueueRef.current.isBusy()) {
+          await saveQueueRef.current.waitForIdle();
+        }
+
+        // 3. Synchronize saveQueue with confirmed authoritative timeline
+        saveQueueRef.current?.setLastSavedTimeline(committedTimeline);
+
+        // 4. Synchronize undo/redo history as ONE external undoable step
+        if (historyRef.current) {
+          historyRef.current.push(committedTimeline);
+          updateHistoryFlags();
+        }
+
+        // 5. Update live timeline state
+        setTimeline(committedTimeline);
+        lastSynchronizedExecutionId.current = receipt.executionId;
+      } finally {
+        setIsAgentExecuting(false);
+      }
+    },
+    [updateHistoryFlags]
+  );
 
   // Map assetId to original filename for display on clips
   const assetNames = useMemo(() => {
@@ -243,16 +300,21 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
   // Persists updated timeline with optimistic UI update and serialized queue dispatch
   const persistTimeline = useCallback(
     (nextTimeline: Timeline) => {
+      if (isAgentExecuting) {
+        console.warn("[TimelineEditor] Edit prevented: Agent execution is active.");
+        return;
+      }
       // 1. Optimistic UI update
       setTimeline(nextTimeline);
 
       // 2. Enqueue into serialized queue
       saveQueueRef.current?.enqueue(nextTimeline);
     },
-    []
+    [isAgentExecuting]
   );
 
   const handleUndo = useCallback(() => {
+    if (isAgentExecuting) return;
     setIsPlaying(false);
     if (!historyRef.current.canUndo()) return;
     const prev = historyRef.current.undo();
@@ -266,9 +328,10 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
       });
       setNoticeMessage(null);
     }
-  }, [persistTimeline, updateHistoryFlags]);
+  }, [isAgentExecuting, persistTimeline, updateHistoryFlags]);
 
   const handleRedo = useCallback(() => {
+    if (isAgentExecuting) return;
     setIsPlaying(false);
     if (!historyRef.current.canRedo()) return;
     const next = historyRef.current.redo();
@@ -282,7 +345,7 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
       });
       setNoticeMessage(null);
     }
-  }, [persistTimeline, updateHistoryFlags]);
+  }, [isAgentExecuting, persistTimeline, updateHistoryFlags]);
 
   // Split operation condition: clip selected AND currentTime strictly inside clip interval
   const canSplit = useMemo(() => {
@@ -294,7 +357,7 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
   }, [selectedClipInfo, currentTime]);
 
   const handleSplitClip = useCallback(() => {
-    if (!timeline || !selectedClipId || !canSplit) return;
+    if (isAgentExecuting || !timeline || !selectedClipId || !canSplit) return;
     setIsPlaying(false);
     try {
       const result = splitClipWithResult(timeline, selectedClipId, currentTime, {
@@ -316,10 +379,19 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
       setNoticeMessage(msg);
       setTimeout(() => setNoticeMessage(null), 3500);
     }
-  }, [timeline, selectedClipId, canSplit, currentTime, mediaAssets, persistTimeline, updateHistoryFlags]);
+  }, [
+    isAgentExecuting,
+    timeline,
+    selectedClipId,
+    canSplit,
+    currentTime,
+    mediaAssets,
+    persistTimeline,
+    updateHistoryFlags
+  ]);
 
   const handleDeleteSelectedClip = useCallback(() => {
-    if (!timeline || !selectedClipId) return;
+    if (isAgentExecuting || !timeline || !selectedClipId) return;
     setIsPlaying(false);
     try {
       const updated = deleteClip(timeline, selectedClipId, { assets: mediaAssets });
@@ -336,12 +408,19 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
       setNoticeMessage(msg);
       setTimeout(() => setNoticeMessage(null), 3500);
     }
-  }, [timeline, selectedClipId, mediaAssets, persistTimeline, updateHistoryFlags]);
+  }, [
+    isAgentExecuting,
+    timeline,
+    selectedClipId,
+    mediaAssets,
+    persistTimeline,
+    updateHistoryFlags
+  ]);
 
   // Track Management Handlers
   const handleAddTrack = useCallback(
     (type: TrackType) => {
-      if (!timeline) return;
+      if (isAgentExecuting || !timeline) return;
       setIsPlaying(false);
       try {
         const defaultName = generateDefaultTrackName(timeline, type);
@@ -361,12 +440,12 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
         setTimeout(() => setNoticeMessage(null), 3500);
       }
     },
-    [timeline, mediaAssets, persistTimeline, updateHistoryFlags]
+    [isAgentExecuting, timeline, mediaAssets, persistTimeline, updateHistoryFlags]
   );
 
   const handleRenameTrack = useCallback(
     (trackId: string, newName: string) => {
-      if (!timeline) return;
+      if (isAgentExecuting || !timeline) return;
       setIsPlaying(false);
       try {
         const updated = renameTrack(
@@ -386,12 +465,12 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
         setTimeout(() => setNoticeMessage(null), 3500);
       }
     },
-    [timeline, mediaAssets, persistTimeline, updateHistoryFlags]
+    [isAgentExecuting, timeline, mediaAssets, persistTimeline, updateHistoryFlags]
   );
 
   const handleMoveTrack = useCallback(
     (trackId: string, direction: "up" | "down") => {
-      if (!timeline) return;
+      if (isAgentExecuting || !timeline) return;
       setIsPlaying(false);
       try {
         const updated = reorderTrack(
@@ -411,12 +490,12 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
         setTimeout(() => setNoticeMessage(null), 3500);
       }
     },
-    [timeline, mediaAssets, persistTimeline, updateHistoryFlags]
+    [isAgentExecuting, timeline, mediaAssets, persistTimeline, updateHistoryFlags]
   );
 
   const handleDeleteTrack = useCallback(
     (trackId: string) => {
-      if (!timeline) return;
+      if (isAgentExecuting || !timeline) return;
       setIsPlaying(false);
 
       const targetTrack = timeline.tracks.find((t) => t.id === trackId);
@@ -441,7 +520,7 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
         setTimeout(() => setNoticeMessage(null), 3500);
       }
     },
-    [timeline, mediaAssets, persistTimeline, updateHistoryFlags]
+    [isAgentExecuting, timeline, mediaAssets, persistTimeline, updateHistoryFlags]
   );
 
   // Keyboard shortcuts:
@@ -466,6 +545,11 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
       if (e.key === " " || e.code === "Space") {
         e.preventDefault();
         handleTogglePlay();
+        return;
+      }
+
+      // If agent execution is active, mutating keyboard shortcuts are disabled
+      if (isAgentExecuting) {
         return;
       }
 
@@ -509,6 +593,7 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [
+    isAgentExecuting,
     canSplit,
     handleSplitClip,
     selectedClipId,
@@ -524,7 +609,7 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
     edge: "left" | "right",
     e: React.PointerEvent<HTMLDivElement>
   ) => {
-    if (!timeline) return;
+    if (!timeline || isAgentExecuting) return;
 
     const startScrollLeft = scrollContainerRef.current?.scrollLeft || 0;
     try {
@@ -550,7 +635,7 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
     clip: Clip,
     e: React.PointerEvent<HTMLDivElement>
   ) => {
-    if (!timeline) return;
+    if (!timeline || isAgentExecuting) return;
 
     // Find the track containing this clip
     const sourceTrack = timeline.tracks.find((t) => t.id === clip.trackId);
@@ -845,9 +930,25 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
           onDelete={handleDeleteSelectedClip}
           onAddTrack={handleAddTrack}
           onOpenExport={() => setIsExportModalOpen(true)}
+          isAgentOpen={isAgentOpen}
+          onToggleAgent={() => setIsAgentOpen((prev) => !prev)}
+          isAgentExecuting={isAgentExecuting}
           onZoomChange={setZoom}
           onResetZoom={handleResetZoom}
         />
+
+        {isAgentOpen && (
+          <AgentAssistantPanel
+            projectId={projectId}
+            timeline={timeline}
+            mediaAssets={mediaAssets}
+            onApplyExecution={handleApplyAgentExecution}
+            onRefreshTimeline={loadTimeline}
+            onBeforeApprove={handleBeforeApprove}
+            onExecutionStateChange={setIsAgentExecuting}
+            onClose={() => setIsAgentOpen(false)}
+          />
+        )}
 
       {/* Selected Clip Info Inspector */}
       {selectedClipInfo && (
@@ -888,10 +989,12 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
             </div>
             <button
               className="split-inspector-btn"
-              disabled={!canSplit}
+              disabled={!canSplit || isAgentExecuting}
               onClick={handleSplitClip}
               title={
-                canSplit
+                isAgentExecuting
+                  ? "Timeline editing is locked while agent plan executes"
+                  : canSplit
                   ? `Split at playhead (${formatTimeCode(currentTime)})`
                   : "Move playhead inside clip to split"
               }
@@ -900,8 +1003,13 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
             </button>
             <button
               className="delete-inspector-btn"
+              disabled={isAgentExecuting}
               onClick={handleDeleteSelectedClip}
-              title="Delete selected clip (Shortcut: Delete / Backspace)"
+              title={
+                isAgentExecuting
+                  ? "Timeline editing is locked while agent plan executes"
+                  : "Delete selected clip (Shortcut: Delete / Backspace)"
+              }
             >
               🗑️ Delete
             </button>
@@ -1020,24 +1128,39 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
                 <button
                   type="button"
                   className="timeline-add-track-footer-btn"
+                  disabled={isAgentExecuting}
                   onClick={() => handleAddTrack("video")}
-                  title="Add another video track"
+                  title={
+                    isAgentExecuting
+                      ? "Timeline editing is locked while agent plan executes"
+                      : "Add another video track"
+                  }
                 >
                   ＋ Add Video Track
                 </button>
                 <button
                   type="button"
                   className="timeline-add-track-footer-btn"
+                  disabled={isAgentExecuting}
                   onClick={() => handleAddTrack("audio")}
-                  title="Add another audio track"
+                  title={
+                    isAgentExecuting
+                      ? "Timeline editing is locked while agent plan executes"
+                      : "Add another audio track"
+                  }
                 >
                   ＋ Add Audio Track
                 </button>
                 <button
                   type="button"
                   className="timeline-add-track-footer-btn"
+                  disabled={isAgentExecuting}
                   onClick={() => handleAddTrack("caption")}
-                  title="Add another caption track"
+                  title={
+                    isAgentExecuting
+                      ? "Timeline editing is locked while agent plan executes"
+                      : "Add another caption track"
+                  }
                 >
                   ＋ Add Caption Track
                 </button>

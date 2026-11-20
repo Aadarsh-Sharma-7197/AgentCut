@@ -22,6 +22,9 @@ interface TimelineToolbarProps {
   onDelete?: () => void;
   onAddTrack?: (type: TrackType) => void;
   onOpenExport?: () => void;
+  isAgentOpen?: boolean;
+  onToggleAgent?: () => void;
+  isAgentExecuting?: boolean;
   onZoomChange: (newZoom: number) => void;
   onResetZoom: () => void;
 }
@@ -44,6 +47,9 @@ export const TimelineToolbar: React.FC<TimelineToolbarProps> = ({
   onDelete,
   onAddTrack,
   onOpenExport,
+  isAgentOpen = false,
+  onToggleAgent,
+  isAgentExecuting = false,
   onZoomChange,
   onResetZoom
 }) => {
@@ -109,12 +115,22 @@ export const TimelineToolbar: React.FC<TimelineToolbarProps> = ({
           <span className="playhead-time-label">Time</span>
           <span>{formatTimeCode(currentTime)}</span>
         </div>
+        {isAgentExecuting && (
+          <span
+            className="timeline-agent-executing-badge"
+            title="Agent plan execution is active. Manual editing is locked."
+          >
+            ⚡ Executing Plan...
+          </span>
+        )}
         <button
           className="undo-btn"
           onClick={onUndo}
-          disabled={!canUndo}
+          disabled={!canUndo || isAgentExecuting}
           title={
-            canUndo
+            isAgentExecuting
+              ? "Timeline editing is locked while agent plan executes"
+              : canUndo
               ? "Undo last edit (Shortcut: Ctrl+Z / Cmd+Z)"
               : "Nothing to undo"
           }
@@ -124,9 +140,11 @@ export const TimelineToolbar: React.FC<TimelineToolbarProps> = ({
         <button
           className="redo-btn"
           onClick={onRedo}
-          disabled={!canRedo}
+          disabled={!canRedo || isAgentExecuting}
           title={
-            canRedo
+            isAgentExecuting
+              ? "Timeline editing is locked while agent plan executes"
+              : canRedo
               ? "Redo last undone edit (Shortcut: Ctrl+Shift+Z / Ctrl+Y)"
               : "Nothing to redo"
           }
@@ -136,9 +154,11 @@ export const TimelineToolbar: React.FC<TimelineToolbarProps> = ({
         <button
           className="split-btn"
           onClick={onSplit}
-          disabled={!canSplit}
+          disabled={!canSplit || isAgentExecuting}
           title={
-            canSplit
+            isAgentExecuting
+              ? "Timeline editing is locked while agent plan executes"
+              : canSplit
               ? `Split selected clip at ${formatTimeCode(currentTime)} (Shortcut: S)`
               : "Select a clip and place playhead inside it to split"
           }
@@ -148,9 +168,11 @@ export const TimelineToolbar: React.FC<TimelineToolbarProps> = ({
         <button
           className="delete-btn"
           onClick={onDelete}
-          disabled={!canDelete}
+          disabled={!canDelete || isAgentExecuting}
           title={
-            canDelete
+            isAgentExecuting
+              ? "Timeline editing is locked while agent plan executes"
+              : canDelete
               ? "Delete selected clip (Shortcut: Delete / Backspace)"
               : "Select a clip to delete"
           }
@@ -165,8 +187,13 @@ export const TimelineToolbar: React.FC<TimelineToolbarProps> = ({
             <button
               type="button"
               className="add-track-btn"
-              title="Add a new track to timeline"
-              onClick={() => setShowAddMenu((prev) => !prev)}
+              disabled={isAgentExecuting}
+              title={
+                isAgentExecuting
+                  ? "Timeline editing is locked while agent plan executes"
+                  : "Add a new track to timeline"
+              }
+              onClick={() => !isAgentExecuting && setShowAddMenu((prev) => !prev)}
             >
               ＋ Add Track ▾
             </button>
@@ -253,6 +280,18 @@ export const TimelineToolbar: React.FC<TimelineToolbarProps> = ({
             title="Export timeline to MP4 video"
           >
             🎬 Export MP4
+          </button>
+        )}
+
+        {onToggleAgent && (
+          <button
+            type="button"
+            className={`timeline-agent-btn ${isAgentOpen ? "active" : ""}`}
+            onClick={onToggleAgent}
+            title={isAgentOpen ? "Hide AI Editing Assistant" : "Show AI Editing Assistant (Plan & Approve Edits)"}
+            data-testid="toggle-agent-btn"
+          >
+            🤖 AI Assistant
           </button>
         )}
       </div>
