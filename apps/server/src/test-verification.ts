@@ -6931,6 +6931,27 @@ frame=    3 fps=0.0 q=-0.0 Lsize=N/A time=00:00:03.04 bitrate=N/A
       const remainingDocs46 = await agentRequestsCol.find({ projectId: proj46Id }).toArray();
       assert(remainingDocs46.length === 0, "Deleting Project 46 cascade-deleted all agent requests");
 
+      // 46.19: Safe State Transition on Missing Provider (Step 6.4.5 Regression)
+      console.log("  - 46.19: Verifying safe state transition from queued to processing before provider failure...");
+      const p46BugRes = await fetch(`${baseUrl}/api/projects`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Step 6.4.5 Bugfix Project" })
+      });
+      const p46BugJson = await p46BugRes.json();
+      const proj46BugId = p46BugJson.data.id;
+
+      const bugReq = await createAgentRequest(proj46BugId, { prompt: "Test provider failure transition" });
+      assert(bugReq.status === "queued", "Request initially queued");
+
+      const failedExecReq = await executeAgentRequest(proj46BugId, bugReq.id);
+      assert(failedExecReq.status === "failed", "Request cleanly transitioned to 'failed'");
+      assert(failedExecReq.error && failedExecReq.error.includes("GEMINI_API_KEY"), "Error records missing Gemini configuration");
+      const dbBugDoc = await agentRequestsCol.findOne({ requestId: bugReq.id });
+      assert(dbBugDoc?.status === "failed", "Database reflects status 'failed' (not stuck in 'queued')");
+
+      await fetch(`${baseUrl}/api/projects/${proj46BugId}`, { method: "DELETE" });
+
 
 
       // Clean up temporary disk files

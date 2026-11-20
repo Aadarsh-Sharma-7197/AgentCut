@@ -613,6 +613,11 @@ export async function executeAgentRequest(
     );
   }
 
+  // 1. Transition to processing
+  if (doc.status === "queued") {
+    await transitionAgentRequestStatus(requestId, "processing");
+  }
+
   let resolvedProvider: AgentPlanProvider;
   try {
     resolvedProvider = provider ?? getActivePlanProvider();
@@ -629,9 +634,6 @@ export async function executeAgentRequest(
       events: [...doc.events, failEvent]
     });
   }
-
-  // Transition to processing
-  await transitionAgentRequestStatus(requestId, "processing");
 
   const controller = new AbortController();
   activeControllers.set(requestId, controller);
